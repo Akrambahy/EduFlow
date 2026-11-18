@@ -26,6 +26,7 @@ func New(cfg *config.Config, db *pgxpool.Pool) *gin.Engine {
 		AllowOrigins:     cfg.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type"},
+		ExposeHeaders:    []string{"X-Total-Count"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -34,10 +35,15 @@ func New(cfg *config.Config, db *pgxpool.Pool) *gin.Engine {
 		httpx.Error(c, http.StatusNotFound, "not_found", "Resource not found", nil)
 	})
 
-	v1 := r.Group("/api/v1")
-	v1.GET("/health", health(db))
+	for _, prefix := range []string{"/api", "/api/v1"} {
+		registerRoutes(r.Group(prefix), db)
+	}
 
 	return r
+}
+
+func registerRoutes(g *gin.RouterGroup, db *pgxpool.Pool) {
+	g.GET("/health", health(db))
 }
 
 func health(db *pgxpool.Pool) gin.HandlerFunc {

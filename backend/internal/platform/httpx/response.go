@@ -1,23 +1,29 @@
 package httpx
 
-import "github.com/gin-gonic/gin"
+import (
+	"net/http"
 
-type ErrorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Details any    `json:"details,omitempty"`
-}
+	"github.com/gin-gonic/gin"
+)
 
 type ErrorResponse struct {
-	Error ErrorBody `json:"error"`
+	Message string `json:"message"`
+	Code    string `json:"code"`
+	Details any    `json:"details,omitempty"`
 }
 
 func Error(c *gin.Context, status int, code, message string, details any) {
 	c.AbortWithStatusJSON(status, ErrorResponse{
-		Error: ErrorBody{Code: code, Message: message, Details: details},
+		Message: message,
+		Code:    code,
+		Details: details,
 	})
 }
 
 func Data(c *gin.Context, status int, data any) {
-	c.JSON(status, gin.H{"data": data})
+	c.JSON(status, data)
+}
+
+func NoContent(c *gin.Context) {
+	c.Status(http.StatusNoContent)
 }
