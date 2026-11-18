@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: eduflow-postgres
+    environment:
+      POSTGRES_USER: eduflow
+      POSTGRES_PASSWORD: eduflow
+      POSTGRES_DB: eduflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - eduflow-pgdata:/var/lib/postgresql/data
+
+volumes:
+  eduflow-pgdata:
