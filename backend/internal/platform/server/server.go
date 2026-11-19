@@ -35,9 +35,7 @@ func New(cfg *config.Config, db *pgxpool.Pool) *gin.Engine {
 		httpx.Error(c, http.StatusNotFound, "not_found", "Resource not found", nil)
 	})
 
-	for _, prefix := range []string{"/api", "/api/v1"} {
-		registerRoutes(r.Group(prefix), db)
-	}
+	registerRoutes(r.Group("/api/v1"), db)
 
 	return r
 }
