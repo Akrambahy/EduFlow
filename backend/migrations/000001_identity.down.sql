@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS refresh_sessions;
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS roles;
+DROP FUNCTION IF EXISTS set_updated_at();
