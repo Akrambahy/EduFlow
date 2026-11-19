@@ -453,3 +453,19 @@ func (s *Service) Snapshot(ctx context.Context, v learning.Viewer, courseID stri
 	})
 	return len(list), err
 }
+
+func (s *Service) CourseResults(ctx context.Context, courseID, studentID string) (map[string]Result, error) {
+	policy, err := s.currentPolicy(ctx, courseID)
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := s.inputs(ctx, courseID, studentID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Result, len(inputs))
+	for id, in := range inputs {
+		out[id] = Compute(policy, *in)
+	}
+	return out, nil
+}

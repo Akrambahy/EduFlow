@@ -7,6 +7,7 @@ import (
 
 	"github.com/Akrambahy/EduFlow/backend/internal/assessment"
 	"github.com/Akrambahy/EduFlow/backend/internal/attendance"
+	"github.com/Akrambahy/EduFlow/backend/internal/certificates"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/performance"
@@ -26,6 +27,7 @@ type Options struct {
 	RefreshLimit gin.HandlerFunc
 	Storage      storage.Storage
 	GitHub       projects.GitHubClient
+	VerifyLimit  gin.HandlerFunc
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool) *gin.Engine {
@@ -116,6 +118,11 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 			return projectsSvc.FileVisible(ctx, learning.Viewer{UserID: r.UserID, Roles: r.Roles, IsAdmin: r.IsAdmin}, fileID)
 		})
 		projects.NewHandler(projectsSvc).Register(api, identitySvc.RequireAuth())
+		verifyLimit := opts.VerifyLimit
+		if verifyLimit == nil {
+			verifyLimit = httpx.NewRateLimiter(time.Second, 30).Middleware()
+		}
+		certificates.NewHandler(certificates.NewService(db, learningSvc, performanceSvc, cfg.Timezone)).Register(api, identitySvc.RequireAuth(), verifyLimit)
 	}
 
 	return r
