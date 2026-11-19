@@ -8,7 +8,10 @@ import (
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/config"
+	"github.com/Akrambahy/EduFlow/backend/internal/platform/files"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/httpx"
+	"github.com/Akrambahy/EduFlow/backend/internal/platform/storage"
+	"github.com/Akrambahy/EduFlow/backend/internal/sessions"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,6 +20,7 @@ import (
 type Options struct {
 	LoginLimit   gin.HandlerFunc
 	RefreshLimit gin.HandlerFunc
+	Storage      storage.Storage
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool) *gin.Engine {
@@ -72,6 +76,22 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 		identitySvc.SetUserScoper(learningSvc)
 		identity.NewUsersHandler(identitySvc, db).Register(api)
 		learning.NewHandler(learningSvc).Register(api, identitySvc.RequireAuth())
+
+		store := opts.Storage
+		if store == nil {
+			local, err := storage.NewLocal(cfg.StorageDir)
+			if err != nil {
+				panic(err)
+			}
+			store = local
+		}
+		sessionsSvc := sessions.NewService(sessions.NewRepository(db), learningSvc, cfg.Timezone)
+		filesSvc := files.NewService(db, store, cfg.MaxUploadBytes)
+		filesSvc.AddAccessRule(func(ctx context.Context, r files.Requester, fileID string) (bool, error) {
+			return sessionsSvc.FileVisible(ctx, learning.Viewer{UserID: r.UserID, Roles: r.Roles, IsAdmin: r.IsAdmin}, fileID)
+		})
+		files.NewHandler(filesSvc, requester).Register(api, identitySvc.RequireAuth())
+		sessions.NewHandler(sessionsSvc).Register(api, identitySvc.RequireAuth())
 	}
 
 	return r
@@ -93,4 +113,13 @@ func health(db *pgxpool.Pool) gin.HandlerFunc {
 
 		httpx.Data(c, http.StatusOK, gin.H{"status": "ok", "database": "up"})
 	}
+}
+
+func requester(c *gin.Context) files.Requester {
+	p := identity.CurrentPrincipal(c)
+	roles := p.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	return files.Requester{UserID: p.UserID, Roles: roles, IsAdmin: p.IsAdmin()}
 }
