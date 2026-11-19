@@ -9,6 +9,7 @@ import (
 	"github.com/Akrambahy/EduFlow/backend/internal/attendance"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
+	"github.com/Akrambahy/EduFlow/backend/internal/performance"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/config"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/files"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/httpx"
@@ -101,6 +102,8 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 			return assessmentSvc.SubmissionFileVisible(ctx, learning.Viewer{UserID: r.UserID, Roles: r.Roles, IsAdmin: r.IsAdmin}, fileID)
 		})
 		assessment.NewHandler(assessmentSvc).Register(api, identitySvc.RequireAuth())
+		performanceSvc := performance.NewService(db, learningSvc)
+		performance.NewHandler(performanceSvc).Register(api, identitySvc.RequireAuth())
 	}
 
 	return r
