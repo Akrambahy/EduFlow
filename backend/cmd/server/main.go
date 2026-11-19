@@ -21,6 +21,10 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if err := cfg.ValidateAuth(); err != nil {
+		log.Fatal(err)
+	}
+
 	pool, err := database.NewPool(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("database: %v", err)

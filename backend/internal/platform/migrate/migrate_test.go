@@ -1,18 +1,19 @@
-package migrate
+package migrate_test
 
 import (
 	"context"
 	"testing"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/platform/migrate"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/testdb"
 	"github.com/jackc/pgx/v5"
 )
 
 func TestMigrationsUpDownUp(t *testing.T) {
-	url := testdb.URL(t)
+	url := testdb.EmptyURL(t)
 	ctx := context.Background()
 
-	r, err := New(url)
+	r, err := migrate.New(url)
 	if err != nil {
 		t.Fatal(err)
 	}
