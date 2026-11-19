@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/communication"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/database"
@@ -271,6 +272,17 @@ func (s *Service) UpdateQuiz(ctx context.Context, v learning.Viewer, id string, 
 		}
 		if err != nil {
 			return err
+		}
+		if in.Status != nil && *in.Status == "published" {
+			var courseID, title string
+			if err := tx.QueryRow(ctx, `SELECT course_id, title FROM quizzes WHERE id = $1`, id).Scan(&courseID, &title); err != nil {
+				return err
+			}
+			if err := communication.NotifyCourseStudents(ctx, tx, courseID, communication.Message{
+				Type: communication.TypeAssignment, Title: "New quiz: " + title, Link: "/assignments", Key: "quiz:published:" + id,
+			}); err != nil {
+				return err
+			}
 		}
 		return record(ctx, tx, v, "quiz.updated", "quiz", id, nil)
 	})

@@ -2,9 +2,11 @@ package sessions
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/communication"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/audit"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/database"
@@ -89,6 +91,12 @@ func (s *Service) Create(ctx context.Context, v learning.Viewer, courseID string
 		if err != nil {
 			return err
 		}
+		if err := communication.NotifyCourseStudents(ctx, tx, courseID, communication.Message{
+			Type: communication.TypeSession, Title: "New session: " + *in.Title, Message: in.StartsAt.UTC().Format(time.RFC3339),
+			Link: "/schedule", Key: "session:created:" + id,
+		}); err != nil {
+			return err
+		}
 		return record(ctx, tx, v, "session.created", "session", id, map[string]any{"courseId": courseID})
 	})
 	if err != nil {
@@ -119,6 +127,18 @@ func (s *Service) Update(ctx context.Context, v learning.Viewer, id string, in S
 		action := "session.updated"
 		if in.Cancelled != nil && *in.Cancelled {
 			action = "session.cancelled"
+		}
+		if in.Cancelled != nil || in.StartsAt != nil || in.EndsAt != nil || in.Location != nil {
+			title := "Session updated"
+			if action == "session.cancelled" {
+				title = "Session cancelled"
+			}
+			if err := communication.NotifyCourseStudents(ctx, tx, courseID, communication.Message{
+				Type: communication.TypeSession, Title: title, Link: "/schedule",
+				Key: "session:changed:" + id + ":" + strconv.FormatInt(time.Now().UnixNano(), 10),
+			}); err != nil {
+				return err
+			}
 		}
 		return record(ctx, tx, v, action, "session", id, map[string]any{"courseId": courseID})
 	})

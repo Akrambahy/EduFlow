@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -251,6 +252,13 @@ func (s *Service) Grade(ctx context.Context, v learning.Viewer, id string, in Gr
 			action = "grade.changed"
 			payload["before"] = *previous
 			payload["reason"] = in.Reason
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO notifications (user_id, type, title, message, link, dedupe_key)
+			SELECT m.student_id, 'grade', 'Your project was graded', '', '/performance', $2
+			FROM project_team_members m WHERE m.team_id = $1
+			ON CONFLICT (user_id, dedupe_key) DO NOTHING`, sub.TeamID, "grade:project:"+id+":"+strconv.FormatInt(time.Now().UnixNano(), 10)); err != nil {
+			return err
 		}
 		return record(ctx, tx, v, action, "project_submission", id, payload)
 	})

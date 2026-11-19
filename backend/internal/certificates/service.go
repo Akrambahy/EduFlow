@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/communication"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/performance"
@@ -297,6 +298,11 @@ func (s *Service) issue(ctx context.Context, tx pgx.Tx, v learning.Viewer, e Eli
 			return "", err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO certificate_events (certificate_id, action, actor_id) VALUES ($1, 'issued', $2)`, id, v.UserID); err != nil {
+			return "", err
+		}
+		if err := communication.NotifyUsers(ctx, tx, []string{e.StudentID}, communication.Message{
+			Type: communication.TypeCertificate, Title: "Your certificate is ready", Message: courseTitle, Link: "/certificates", Key: "certificate:issued:" + id,
+		}); err != nil {
 			return "", err
 		}
 		return id, audit.Record(ctx, tx, audit.Event{ActorID: v.UserID, Action: "certificate.issued", TargetType: "certificate", TargetID: id,
