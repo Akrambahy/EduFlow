@@ -43,13 +43,15 @@ func NewApp(t *testing.T, opts ...server.Options) *App {
 	gin.SetMode(gin.TestMode)
 	pool := testdb.New(t)
 	cfg := &config.Config{
-		Env:             "test",
-		AllowedOrigins:  []string{"http://localhost:5173"},
-		JWTSecret:       []byte("test-secret-test-secret-test-secret!"),
-		AccessTokenTTL:  15 * time.Minute,
-		RefreshTokenTTL: time.Hour,
-		MaxUploadBytes:  1 << 20,
-		Timezone:        time.UTC,
+		Env:                    "test",
+		AllowedOrigins:         []string{"http://localhost:5173"},
+		JWTSecret:              []byte("test-secret-test-secret-test-secret!"),
+		AccessTokenTTL:         15 * time.Minute,
+		RefreshTokenTTL:        time.Hour,
+		MaxUploadBytes:         1 << 20,
+		Timezone:               time.UTC,
+		AttendanceTokenTTL:     30 * time.Second,
+		AttendanceGraceMinutes: 10,
 	}
 	var o server.Options
 	if len(opts) > 0 {

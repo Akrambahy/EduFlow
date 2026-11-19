@@ -70,3 +70,16 @@ Gin is configured with no trusted proxies, so `X-Forwarded-For` cannot be spoofe
 ## Audit
 
 Audit events go to `audit_logs` with actor, action, target, safe context, IP address and time. Passwords and tokens are never written to audit context or to logs.
+
+## QR attendance
+
+- The instructor opens a window with `POST /api/v1/sessions/{id}/attendance/start`. Each window gets its own random 32-byte secret, which is never returned by the API.
+- The QR value is `base64url(windowId ‖ step ‖ HMAC-SHA256(secret, windowId ‖ step)[:16])`, where `step = floor(now / ATTENDANCE_TOKEN_TTL)` (default 30 s).
+- The instructor screen asks `GET .../attendance/token` for a fresh value before `tokenExpiresAt`.
+- To allow for scan latency, the server accepts the current step and the previous one. Anything older returns `attendance_token_expired`. A token from the future, or with a bad MAC, returns `attendance_token_invalid`.
+- Check-in validates every condition inside one transaction: the token, the window being open, the session not being cancelled, the caller having the student role, and a current enrollment.
+- The server's clock decides between `present` and `late`: `late` once `now > startsAt + graceMinutes`, where the default is `ATTENDANCE_GRACE_MINUTES = 10` and each window can override it.
+- `UNIQUE (attendance_session_id, student_id)` together with `ON CONFLICT DO NOTHING` ensures that retries and concurrent scans create exactly one record. Duplicates get 409 `already_checked_in`.
+- Closing the window revokes every token for it. It also records `absent` (method `auto`) for each enrolled student who has no record yet.
+- Corrections require a reason. They are written to `audit_logs` as `attendance.corrected`, with the before and after status.
+- **Residual risk:** a live QR code can still be forwarded to someone outside the room within its 30-second lifetime. QR attendance does not prove physical presence (SRS 10.2).

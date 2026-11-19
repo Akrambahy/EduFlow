@@ -13,17 +13,19 @@ import (
 )
 
 type Config struct {
-	Env             string
-	Port            string
-	DatabaseURL     string
-	AllowedOrigins  []string
-	JWTSecret       []byte
-	AccessTokenTTL  time.Duration
-	RefreshTokenTTL time.Duration
-	CookieSecure    bool
-	StorageDir      string
-	MaxUploadBytes  int64
-	Timezone        *time.Location
+	Env                    string
+	Port                   string
+	DatabaseURL            string
+	AllowedOrigins         []string
+	JWTSecret              []byte
+	AccessTokenTTL         time.Duration
+	RefreshTokenTTL        time.Duration
+	CookieSecure           bool
+	StorageDir             string
+	MaxUploadBytes         int64
+	Timezone               *time.Location
+	AttendanceTokenTTL     time.Duration
+	AttendanceGraceMinutes int
 }
 
 func Load() (*Config, error) {
@@ -58,6 +60,15 @@ func Load() (*Config, error) {
 		return nil, errors.New("MAX_UPLOAD_MB must be between 1 and 1024")
 	}
 	cfg.MaxUploadBytes = int64(mb) << 20
+	if cfg.AttendanceTokenTTL, err = getDuration("ATTENDANCE_TOKEN_TTL", 30*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.AttendanceTokenTTL < 10*time.Second || cfg.AttendanceTokenTTL > 5*time.Minute {
+		return nil, errors.New("ATTENDANCE_TOKEN_TTL must be between 10s and 5m")
+	}
+	if cfg.AttendanceGraceMinutes, err = strconv.Atoi(getEnv("ATTENDANCE_GRACE_MINUTES", "10")); err != nil || cfg.AttendanceGraceMinutes < 0 || cfg.AttendanceGraceMinutes > 240 {
+		return nil, errors.New("ATTENDANCE_GRACE_MINUTES must be between 0 and 240")
+	}
 	if cfg.Timezone, err = time.LoadLocation(getEnv("APP_TIMEZONE", "Africa/Cairo")); err != nil {
 		return nil, fmt.Errorf("APP_TIMEZONE: %w", err)
 	}

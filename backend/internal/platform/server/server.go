@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/attendance"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/config"
@@ -92,6 +93,8 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 		})
 		files.NewHandler(filesSvc, requester).Register(api, identitySvc.RequireAuth())
 		sessions.NewHandler(sessionsSvc).Register(api, identitySvc.RequireAuth())
+		attendanceSvc := attendance.NewService(attendance.NewRepository(db), learningSvc, attendance.Config{TokenTTL: cfg.AttendanceTokenTTL, GraceMinutes: cfg.AttendanceGraceMinutes})
+		attendance.NewHandler(attendanceSvc).Register(api, identitySvc.RequireAuth())
 	}
 
 	return r
