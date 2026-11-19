@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -57,7 +58,7 @@ func run(r *migrate.Runner, env string, args []string) error {
 		return r.Down()
 	case "force":
 		if len(args) < 2 {
-			return fmt.Errorf(usage)
+			return errors.New(usage)
 		}
 		v, err := strconv.Atoi(args[1])
 		if err != nil {
@@ -67,6 +68,6 @@ func run(r *migrate.Runner, env string, args []string) error {
 	case "version":
 		return nil
 	default:
-		return fmt.Errorf(usage)
+		return errors.New(usage)
 	}
 }

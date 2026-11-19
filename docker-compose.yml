@@ -10,6 +10,39 @@ services:
       - "5432:5432"
     volumes:
       - eduflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eduflow -d eduflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: ./backend
+    entrypoint: ["/app/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://eduflow:eduflow@postgres:5432/eduflow?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["api"]
+
+  api:
+    build: ./backend
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgres://eduflow:eduflow@postgres:5432/eduflow?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in your shell or a .env file next to docker-compose.yml}
+      ALLOWED_ORIGINS: http://localhost:5173
+      COOKIE_SECURE: "false"
+    ports:
+      - "8080:8080"
+    volumes:
+      - eduflow-storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["api"]
 
 volumes:
   eduflow-pgdata:
+  eduflow-storage:

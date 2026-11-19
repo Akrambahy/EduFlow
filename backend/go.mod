@@ -2,6 +2,8 @@ module github.com/Akrambahy/EduFlow/backend
 
 go 1.27.1
 
+toolchain go1.27.4
+
 require (
 	github.com/gin-contrib/cors v1.7.11
 	github.com/gin-gonic/gin v1.12.0
@@ -47,4 +49,5 @@ require (
 	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
