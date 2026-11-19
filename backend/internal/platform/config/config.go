@@ -26,6 +26,7 @@ type Config struct {
 	Timezone               *time.Location
 	AttendanceTokenTTL     time.Duration
 	AttendanceGraceMinutes int
+	GitHubToken            string
 }
 
 func Load() (*Config, error) {
@@ -39,6 +40,7 @@ func Load() (*Config, error) {
 		AllowedOrigins: splitList(getEnv("ALLOWED_ORIGINS", "http://localhost:5173")),
 		JWTSecret:      []byte(os.Getenv("JWT_SECRET")),
 		StorageDir:     getEnv("STORAGE_DIR", "./storage"),
+		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 	}
 
 	if cfg.DatabaseURL == "" {

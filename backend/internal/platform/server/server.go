@@ -14,6 +14,7 @@ import (
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/files"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/httpx"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/storage"
+	"github.com/Akrambahy/EduFlow/backend/internal/projects"
 	"github.com/Akrambahy/EduFlow/backend/internal/sessions"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,7 @@ type Options struct {
 	LoginLimit   gin.HandlerFunc
 	RefreshLimit gin.HandlerFunc
 	Storage      storage.Storage
+	GitHub       projects.GitHubClient
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool) *gin.Engine {
@@ -103,7 +105,17 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 		})
 		assessment.NewHandler(assessmentSvc).Register(api, identitySvc.RequireAuth())
 		performanceSvc := performance.NewService(db, learningSvc)
+		performanceSvc.SetProjectSource(projects.GradeItems)
 		performance.NewHandler(performanceSvc).Register(api, identitySvc.RequireAuth())
+		gh := opts.GitHub
+		if gh == nil {
+			gh = projects.NewHTTPGitHub(cfg.GitHubToken)
+		}
+		projectsSvc := projects.NewService(db, learningSvc, gh, cfg.Timezone)
+		filesSvc.AddAccessRule(func(ctx context.Context, r files.Requester, fileID string) (bool, error) {
+			return projectsSvc.FileVisible(ctx, learning.Viewer{UserID: r.UserID, Roles: r.Roles, IsAdmin: r.IsAdmin}, fileID)
+		})
+		projects.NewHandler(projectsSvc).Register(api, identitySvc.RequireAuth())
 	}
 
 	return r

@@ -15,6 +15,7 @@ import (
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/server"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/storage"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/testdb"
+	"github.com/Akrambahy/EduFlow/backend/internal/projects"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -56,6 +57,9 @@ func NewApp(t *testing.T, opts ...server.Options) *App {
 	var o server.Options
 	if len(opts) > 0 {
 		o = opts[0]
+	}
+	if o.GitHub == nil {
+		o.GitHub = offlineGitHub{}
 	}
 	if o.Storage == nil {
 		local, err := storage.NewLocal(t.TempDir())
@@ -190,4 +194,10 @@ func (a *App) Upload(token, filename string, content []byte) Response {
 	rec := httptest.NewRecorder()
 	a.Router.ServeHTTP(rec, req)
 	return Response{ResponseRecorder: rec, t: a.T}
+}
+
+type offlineGitHub struct{}
+
+func (offlineGitHub) Repository(context.Context, string, string) (*projects.RepoMetadata, error) {
+	return nil, projects.ErrRepoUnavailable
 }
