@@ -66,6 +66,7 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 			LoginLimit:   opts.LoginLimit,
 			RefreshLimit: opts.RefreshLimit,
 		}).Register(api)
+		identity.NewUsersHandler(identitySvc, db).Register(api)
 	}
 
 	return r
