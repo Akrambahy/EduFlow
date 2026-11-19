@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/assessment"
 	"github.com/Akrambahy/EduFlow/backend/internal/attendance"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
@@ -95,6 +96,11 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 		sessions.NewHandler(sessionsSvc).Register(api, identitySvc.RequireAuth())
 		attendanceSvc := attendance.NewService(attendance.NewRepository(db), learningSvc, attendance.Config{TokenTTL: cfg.AttendanceTokenTTL, GraceMinutes: cfg.AttendanceGraceMinutes})
 		attendance.NewHandler(attendanceSvc).Register(api, identitySvc.RequireAuth())
+		assessmentSvc := assessment.NewService(db, learningSvc, cfg.Timezone)
+		filesSvc.AddAccessRule(func(ctx context.Context, r files.Requester, fileID string) (bool, error) {
+			return assessmentSvc.SubmissionFileVisible(ctx, learning.Viewer{UserID: r.UserID, Roles: r.Roles, IsAdmin: r.IsAdmin}, fileID)
+		})
+		assessment.NewHandler(assessmentSvc).Register(api, identitySvc.RequireAuth())
 	}
 
 	return r
