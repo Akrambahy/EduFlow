@@ -51,14 +51,15 @@ type loginRequest struct {
 }
 
 type UserResponse struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Email      string   `json:"email"`
-	Role       string   `json:"role"`
-	Roles      []string `json:"roles"`
-	Avatar     *string  `json:"avatar"`
-	University *string  `json:"university"`
-	IsActive   bool     `json:"isActive"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Email      string    `json:"email"`
+	Role       string    `json:"role"`
+	Roles      []string  `json:"roles"`
+	Avatar     *string   `json:"avatar"`
+	University *string   `json:"university"`
+	IsActive   bool      `json:"isActive"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 type sessionResponse struct {
@@ -82,6 +83,7 @@ func ToUserResponse(u *User) UserResponse {
 		Avatar:     u.AvatarURL,
 		University: u.University,
 		IsActive:   u.IsActive,
+		CreatedAt:  u.CreatedAt,
 	}
 }
 
