@@ -63,10 +63,10 @@ type UserResponse struct {
 }
 
 type sessionResponse struct {
-	Token     string       `json:"token"`
-	TokenType string       `json:"tokenType"`
-	ExpiresIn int          `json:"expiresIn"`
-	User      UserResponse `json:"user"`
+	Token     string          `json:"token"`
+	TokenType string          `json:"tokenType"`
+	ExpiresIn int             `json:"expiresIn"`
+	User      ProfileResponse `json:"user"`
 }
 
 func ToUserResponse(u *User) UserResponse {
@@ -135,17 +135,22 @@ func (h *Handler) me(c *gin.Context) {
 		httpx.Internal(c, err)
 		return
 	}
-	httpx.Data(c, http.StatusOK, ToUserResponse(user))
+	h.writeProfile(c, http.StatusOK, user)
 }
 
 func (h *Handler) respondSession(c *gin.Context, s *Session) {
 	h.setCookie(c, s.RefreshToken, int(h.opts.RefreshTTL.Seconds()))
+	profile, err := h.svc.Profile(c.Request.Context(), s.User)
+	if err != nil {
+		httpx.Internal(c, err)
+		return
+	}
 	c.Header("Cache-Control", "no-store")
 	httpx.Data(c, http.StatusOK, sessionResponse{
 		Token:     s.AccessToken,
 		TokenType: "Bearer",
 		ExpiresIn: int(h.svc.tokens.TTL().Seconds()),
-		User:      ToUserResponse(s.User),
+		User:      profile,
 	})
 }
 
@@ -163,4 +168,17 @@ func (h *Handler) setCookie(c *gin.Context, value string, maxAge int) {
 
 func meta(c *gin.Context) SessionMeta {
 	return SessionMeta{UserAgent: c.Request.UserAgent(), IP: c.ClientIP()}
+}
+
+func (h *Handler) writeProfile(c *gin.Context, status int, u *User) {
+	writeProfile(c, h.svc, status, u)
+}
+
+func writeProfile(c *gin.Context, svc *Service, status int, u *User) {
+	profile, err := svc.Profile(c.Request.Context(), u)
+	if err != nil {
+		httpx.Internal(c, err)
+		return
+	}
+	httpx.Data(c, status, profile)
 }

@@ -50,8 +50,39 @@ func NormalizeRoles(roles []string) ([]string, error) {
 	return SortRoles(out), nil
 }
 
-func (s *Service) ListUsers(ctx context.Context, f UserFilter, page httpx.Page) ([]User, int, error) {
+func (s *Service) ListUsers(ctx context.Context, p *Principal, f UserFilter, page httpx.Page) ([]User, int, error) {
+	if !p.IsAdmin() {
+		ids, err := s.visibleIDs(ctx, p)
+		if err != nil {
+			return nil, 0, err
+		}
+		f.Scoped = true
+		f.IDs = ids
+	}
 	return s.repo.ListUsers(ctx, f, page)
+}
+
+func (s *Service) CanView(ctx context.Context, p *Principal, id string) (bool, error) {
+	if p.IsAdmin() || p.UserID == id {
+		return true, nil
+	}
+	ids, err := s.visibleIDs(ctx, p)
+	if err != nil {
+		return false, err
+	}
+	for _, v := range ids {
+		if v == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) visibleIDs(ctx context.Context, p *Principal) ([]string, error) {
+	if s.scoper == nil {
+		return []string{p.UserID}, nil
+	}
+	return s.scoper.VisibleUserIDs(ctx, p.UserID, p.Roles)
 }
 
 func (s *Service) CreateUser(ctx context.Context, actor Actor, in CreateUserInput) (*User, error) {

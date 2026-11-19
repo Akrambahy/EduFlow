@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
+	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/config"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/httpx"
 	"github.com/gin-contrib/cors"
@@ -66,7 +67,11 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 			LoginLimit:   opts.LoginLimit,
 			RefreshLimit: opts.RefreshLimit,
 		}).Register(api)
+		learningSvc := learning.NewService(learning.NewRepository(db))
+		identitySvc.SetProfileExtender(learningSvc)
+		identitySvc.SetUserScoper(learningSvc)
 		identity.NewUsersHandler(identitySvc, db).Register(api)
+		learning.NewHandler(learningSvc).Register(api, identitySvc.RequireAuth())
 	}
 
 	return r

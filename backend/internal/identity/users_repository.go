@@ -14,6 +14,8 @@ type UserFilter struct {
 	Role     string
 	Query    string
 	IsActive *bool
+	Scoped   bool
+	IDs      []string
 }
 
 type NewUser struct {
@@ -58,7 +60,8 @@ const listWhere = `
 		SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
 		WHERE ur.user_id = u.id AND r.name = $1))
 	  AND ($2 = '' OR u.name ILIKE $2 ESCAPE '\' OR u.email ILIKE $2 ESCAPE '\')
-	  AND ($3::boolean IS NULL OR u.is_active = $3)`
+	  AND ($3::boolean IS NULL OR u.is_active = $3)
+	  AND (NOT $4 OR u.id = ANY($5::uuid[]))`
 
 func (r *Repository) ListUsers(ctx context.Context, f UserFilter, page httpx.Page) ([]User, int, error) {
 	pattern := ""
@@ -66,7 +69,7 @@ func (r *Repository) ListUsers(ctx context.Context, f UserFilter, page httpx.Pag
 		pattern = "%" + escapeLike(q) + "%"
 	}
 	rows, err := r.db.Query(ctx, `SELECT `+userColumns+` FROM users u `+listWhere+`
-		ORDER BY u.name, u.id LIMIT $4 OFFSET $5`, f.Role, pattern, f.IsActive, page.Limit, page.Offset)
+		ORDER BY u.name, u.id LIMIT $6 OFFSET $7`, f.Role, pattern, f.IsActive, f.Scoped, f.IDs, page.Limit, page.Offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -82,7 +85,7 @@ func (r *Repository) ListUsers(ctx context.Context, f UserFilter, page httpx.Pag
 	}
 
 	var total int
-	if err := r.db.QueryRow(ctx, `SELECT count(*) FROM users u `+listWhere, f.Role, pattern, f.IsActive).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT count(*) FROM users u `+listWhere, f.Role, pattern, f.IsActive, f.Scoped, f.IDs).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	return users, total, nil

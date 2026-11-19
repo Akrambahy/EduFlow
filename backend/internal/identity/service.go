@@ -24,6 +24,8 @@ type Service struct {
 	repo       *Repository
 	tokens     *TokenIssuer
 	refreshTTL time.Duration
+	extender   ProfileExtender
+	scoper     UserScoper
 }
 
 func NewService(repo *Repository, tokens *TokenIssuer, refreshTTL time.Duration) *Service {

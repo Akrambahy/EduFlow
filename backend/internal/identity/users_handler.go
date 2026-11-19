@@ -26,9 +26,9 @@ func (h *UsersHandler) Register(g *gin.RouterGroup) {
 	authed.GET("/users/me", h.getMe)
 	authed.PATCH("/users/me", h.updateMe)
 	authed.POST("/users/me/password", h.changePassword)
+	authed.GET("/users", h.listUsers)
 	authed.GET("/users/:id", h.getUser)
 
-	admin.GET("/users", h.listUsers)
 	admin.POST("/users", h.createUser)
 	admin.PATCH("/users/:id", h.updateUser)
 	admin.PUT("/users/:id/roles", h.setRoles)
@@ -83,7 +83,7 @@ func (h *UsersHandler) listUsers(c *gin.Context) {
 		return
 	}
 	page := httpx.ParsePage(c)
-	users, total, err := h.svc.ListUsers(c.Request.Context(), UserFilter{Role: role, Query: c.Query("q"), IsActive: active}, page)
+	users, total, err := h.svc.ListUsers(c.Request.Context(), CurrentPrincipal(c), UserFilter{Role: role, Query: c.Query("q"), IsActive: active}, page)
 	if err != nil {
 		httpx.Internal(c, err)
 		return
@@ -117,8 +117,12 @@ func (h *UsersHandler) getUser(c *gin.Context) {
 	if !ok {
 		return
 	}
-	p := CurrentPrincipal(c)
-	if p.UserID != id && !p.IsAdmin() {
+	visible, err := h.svc.CanView(c.Request.Context(), CurrentPrincipal(c), id)
+	if err != nil {
+		httpx.Internal(c, err)
+		return
+	}
+	if !visible {
 		Forbidden(c)
 		return
 	}
@@ -134,7 +138,7 @@ func (h *UsersHandler) getMe(c *gin.Context) {
 	if writeUserError(c, err) {
 		return
 	}
-	httpx.Data(c, http.StatusOK, ToUserResponse(u))
+	writeProfile(c, h.svc, http.StatusOK, u)
 }
 
 func (h *UsersHandler) updateMe(c *gin.Context) {
@@ -146,7 +150,7 @@ func (h *UsersHandler) updateMe(c *gin.Context) {
 	if writeUserError(c, err) {
 		return
 	}
-	httpx.Data(c, http.StatusOK, ToUserResponse(u))
+	writeProfile(c, h.svc, http.StatusOK, u)
 }
 
 func (h *UsersHandler) updateUser(c *gin.Context) {

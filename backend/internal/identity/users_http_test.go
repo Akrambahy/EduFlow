@@ -29,7 +29,6 @@ func TestUserManagementRequiresAdmin(t *testing.T) {
 		method, path string
 		body         any
 	}{
-		{http.MethodGet, "/api/v1/users", nil},
 		{http.MethodPost, "/api/v1/users", map[string]any{"name": "X", "email": "x@eduflow.dev", "password": "password1", "roles": []string{"admin"}}},
 		{http.MethodPatch, "/api/v1/users/" + targetID, map[string]any{"isActive": false}},
 		{http.MethodPut, "/api/v1/users/" + targetID + "/roles", map[string]any{"roles": []string{"admin"}}},
