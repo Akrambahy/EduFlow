@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/joho/godotenv"
 )
@@ -20,6 +21,9 @@ type Config struct {
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 	CookieSecure    bool
+	StorageDir      string
+	MaxUploadBytes  int64
+	Timezone        *time.Location
 }
 
 func Load() (*Config, error) {
@@ -32,6 +36,7 @@ func Load() (*Config, error) {
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		AllowedOrigins: splitList(getEnv("ALLOWED_ORIGINS", "http://localhost:5173")),
 		JWTSecret:      []byte(os.Getenv("JWT_SECRET")),
+		StorageDir:     getEnv("STORAGE_DIR", "./storage"),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -47,6 +52,14 @@ func Load() (*Config, error) {
 	}
 	if cfg.CookieSecure, err = getBool("COOKIE_SECURE", env == "production"); err != nil {
 		return nil, err
+	}
+	mb, err := strconv.Atoi(getEnv("MAX_UPLOAD_MB", "20"))
+	if err != nil || mb < 1 || mb > 1024 {
+		return nil, errors.New("MAX_UPLOAD_MB must be between 1 and 1024")
+	}
+	cfg.MaxUploadBytes = int64(mb) << 20
+	if cfg.Timezone, err = time.LoadLocation(getEnv("APP_TIMEZONE", "Africa/Cairo")); err != nil {
+		return nil, fmt.Errorf("APP_TIMEZONE: %w", err)
 	}
 
 	return cfg, nil

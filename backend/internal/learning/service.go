@@ -454,3 +454,11 @@ func dedupe(ids []string) []string {
 	}
 	return out
 }
+
+const CourseVisibility = courseVisible
+
+func (s *Service) CheckManage(ctx context.Context, v Viewer, courseID string) error {
+	return s.repo.inTx(ctx, func(tx pgx.Tx) error {
+		return s.authorizeCourse(ctx, tx, v, courseID)
+	})
+}

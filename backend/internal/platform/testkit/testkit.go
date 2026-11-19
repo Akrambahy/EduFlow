@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/config"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/server"
+	"github.com/Akrambahy/EduFlow/backend/internal/platform/storage"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/testdb"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,6 +39,7 @@ type App struct {
 
 func NewApp(t *testing.T, opts ...server.Options) *App {
 	t.Helper()
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	pool := testdb.New(t)
 	cfg := &config.Config{
@@ -45,10 +48,19 @@ func NewApp(t *testing.T, opts ...server.Options) *App {
 		JWTSecret:       []byte("test-secret-test-secret-test-secret!"),
 		AccessTokenTTL:  15 * time.Minute,
 		RefreshTokenTTL: time.Hour,
+		MaxUploadBytes:  1 << 20,
+		Timezone:        time.UTC,
 	}
 	var o server.Options
 	if len(opts) > 0 {
 		o = opts[0]
+	}
+	if o.Storage == nil {
+		local, err := storage.NewLocal(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Storage = local
 	}
 	return &App{T: t, DB: pool, Router: server.NewWithOptions(cfg, pool, o), Config: cfg}
 }
@@ -152,4 +164,28 @@ func (a *App) Expect(res Response, status int, code string) {
 	if code != "" && res.ErrorCode() != code {
 		a.T.Fatalf("code %q, want %q: %s", res.ErrorCode(), code, res.Body.String())
 	}
+}
+
+func (a *App) Upload(token, filename string, content []byte) Response {
+	a.T.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		a.T.Fatal(err)
+	}
+	if _, err := part.Write(content); err != nil {
+		a.T.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		a.T.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/files", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	a.Router.ServeHTTP(rec, req)
+	return Response{ResponseRecorder: rec, t: a.T}
 }

@@ -16,6 +16,10 @@ import (
 func init() {
 	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
 		_ = v.RegisterValidation("url_or_empty", urlOrEmpty)
+		_ = v.RegisterValidation("uuid_or_empty", func(fl validator.FieldLevel) bool {
+			s := fl.Field().String()
+			return s == "" || IsUUID(s)
+		})
 		v.RegisterTagNameFunc(func(f reflect.StructField) string {
 			name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
 			if name == "-" {
@@ -63,7 +67,7 @@ func validationMessage(fe validator.FieldError) string {
 		return "must be at most " + fe.Param()
 	case "oneof":
 		return "must be one of: " + fe.Param()
-	case "uuid", "uuid4":
+	case "uuid", "uuid4", "uuid_or_empty":
 		return "must be a valid id"
 	case "url", "http_url", "url_or_empty":
 		return "must be a valid URL"
