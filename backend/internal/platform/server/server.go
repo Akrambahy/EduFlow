@@ -8,6 +8,8 @@ import (
 	"github.com/Akrambahy/EduFlow/backend/internal/assessment"
 	"github.com/Akrambahy/EduFlow/backend/internal/attendance"
 	"github.com/Akrambahy/EduFlow/backend/internal/certificates"
+	"github.com/Akrambahy/EduFlow/backend/internal/communication"
+	"github.com/Akrambahy/EduFlow/backend/internal/dashboard"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/performance"
@@ -54,7 +56,7 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 		AllowOrigins:     cfg.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type"},
-		ExposeHeaders:    []string{"X-Total-Count"},
+		ExposeHeaders:    []string{"X-Total-Count", "X-Unread-Count"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -118,6 +120,8 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 			return projectsSvc.FileVisible(ctx, learning.Viewer{UserID: r.UserID, Roles: r.Roles, IsAdmin: r.IsAdmin}, fileID)
 		})
 		projects.NewHandler(projectsSvc).Register(api, identitySvc.RequireAuth())
+		communication.NewHandler(communication.NewService(db, learningSvc)).Register(api, identitySvc.RequireAuth())
+		dashboard.Register(api, identitySvc.RequireAuth(), dashboard.NewService(db, performanceSvc, cfg.Timezone))
 		verifyLimit := opts.VerifyLimit
 		if verifyLimit == nil {
 			verifyLimit = httpx.NewRateLimiter(time.Second, 30).Middleware()

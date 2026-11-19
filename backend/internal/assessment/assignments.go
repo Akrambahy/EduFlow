@@ -3,9 +3,11 @@ package assessment
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Akrambahy/EduFlow/backend/internal/communication"
 	"github.com/Akrambahy/EduFlow/backend/internal/identity"
 	"github.com/Akrambahy/EduFlow/backend/internal/learning"
 	"github.com/Akrambahy/EduFlow/backend/internal/platform/database"
@@ -175,6 +177,9 @@ func (s *Service) CreateAssignment(ctx context.Context, v learning.Viewer, cours
 		if err != nil {
 			return err
 		}
+		if err := s.announceAssignment(ctx, tx, id); err != nil {
+			return err
+		}
 		return record(ctx, tx, v, "assignment.created", "assignment", id, map[string]any{"courseId": courseID})
 	})
 	if err != nil {
@@ -222,6 +227,9 @@ func (s *Service) UpdateAssignment(ctx context.Context, v learning.Viewer, id st
 		}
 		if policy == LateReject && until != nil {
 			return ErrInvalidLatePolicy
+		}
+		if err := s.announceAssignment(ctx, tx, id); err != nil {
+			return err
 		}
 		return record(ctx, tx, v, "assignment.updated", "assignment", id, nil)
 	})
@@ -459,6 +467,16 @@ func (s *Service) Grade(ctx context.Context, v learning.Viewer, id string, in Gr
 			payload["before"] = *previous
 			payload["reason"] = in.Reason
 		}
+		title := "Your submission was graded"
+		if in.ReturnForRevision {
+			title = "Your submission was returned for revision"
+		}
+		if err := communication.NotifyUsers(ctx, tx, []string{sub.StudentID}, communication.Message{
+			Type: communication.TypeGrade, Title: title, Message: sub.StudentName, Link: "/assignments",
+			Key: "grade:submission:" + id + ":" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		}); err != nil {
+			return err
+		}
 		return record(ctx, tx, v, action, "submission", id, payload)
 	})
 	if err != nil {
@@ -500,4 +518,18 @@ func emptyToNil(s []string) []string {
 		return nil
 	}
 	return s
+}
+
+func (s *Service) announceAssignment(ctx context.Context, tx pgx.Tx, id string) error {
+	var courseID, title string
+	var published bool
+	if err := tx.QueryRow(ctx, `SELECT course_id, title, status = 'published' FROM assignments WHERE id = $1`, id).Scan(&courseID, &title, &published); err != nil {
+		return err
+	}
+	if !published {
+		return nil
+	}
+	return communication.NotifyCourseStudents(ctx, tx, courseID, communication.Message{
+		Type: communication.TypeAssignment, Title: "New assignment: " + title, Link: "/assignments", Key: "assignment:published:" + id,
+	})
 }
