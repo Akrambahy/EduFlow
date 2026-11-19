@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,11 @@ func Error(c *gin.Context, status int, code, message string, details any) {
 		Code:    code,
 		Details: details,
 	})
+}
+
+func Internal(c *gin.Context, err error) {
+	log.Printf("internal error: %s %s: %v", c.Request.Method, c.FullPath(), err)
+	Error(c, http.StatusInternalServerError, "internal_error", "Something went wrong", nil)
 }
 
 func Data(c *gin.Context, status int, data any) {
