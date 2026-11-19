@@ -22,7 +22,7 @@ func Error(c *gin.Context, status int, code, message string, details any) {
 }
 
 func Internal(c *gin.Context, err error) {
-	log.Printf("internal error: %s %s: %v", c.Request.Method, c.FullPath(), err)
+	log.Printf("level=error request_id=%s method=%s route=%s error=%q", c.GetString("requestId"), c.Request.Method, c.FullPath(), err.Error())
 	Error(c, http.StatusInternalServerError, "internal_error", "Something went wrong", nil)
 }
 

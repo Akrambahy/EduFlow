@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -46,17 +47,18 @@ func NewWithOptions(cfg *config.Config, db *pgxpool.Pool, opts Options) *gin.Eng
 
 	r := gin.New()
 	_ = r.SetTrustedProxies(nil)
+	r.Use(httpx.RequestID())
 	if gin.Mode() != gin.TestMode {
-		r.Use(gin.Logger())
+		r.Use(httpx.Logger())
 	}
-	r.Use(gin.CustomRecovery(func(c *gin.Context, _ any) {
-		httpx.Error(c, http.StatusInternalServerError, "internal_error", "Something went wrong", nil)
+	r.Use(gin.CustomRecovery(func(c *gin.Context, rec any) {
+		httpx.Internal(c, fmt.Errorf("panic: %v", rec))
 	}))
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Authorization", "Content-Type"},
-		ExposeHeaders:    []string{"X-Total-Count", "X-Unread-Count"},
+		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
+		ExposeHeaders:    []string{"X-Total-Count", "X-Unread-Count", "X-Request-ID"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))

@@ -1,0 +1,4013 @@
+openapi: 3.1.0
+info:
+  title: EduFlow API
+  version: 1.0.0
+  summary: REST API of the EduFlow learning management backend (Go / Gin).
+  description: |
+    All routes live under the server prefix `/api/v1`; paths below are written without it.
+
+    ## Conventions
+    - **Success bodies are returned directly** (no envelope). `204 No Content` responses have no body.
+    - **Errors** always use the `Error` schema: `{ "message": string, "code": string, "details"?: object }`.
+      Validation failures use status 400 with code `validation_error` and `details` mapping the camelCase
+      field name to a message (for example `{"title": "is required"}`). A missing or malformed JSON body
+      yields 400 `invalid_body`. Unexpected failures yield 500 `internal_error`.
+    - **Lists** return a JSON array; the total number of matching items is in the `X-Total-Count`
+      response header. Paginated list endpoints accept `page` (default 1) and `limit`
+      (default 20, max 100; values below 1 fall back to the defaults).
+    - **IDs** are UUID strings. A path id that is not a valid UUID yields `404 not_found`; a query id that is
+      not a valid UUID yields `400 validation_error`.
+    - **Fields** are camelCase. **Timestamps** are RFC 3339 in UTC. Local date/time labels
+      (`date`, `startTime`, `dueDate`, ...) are rendered in the server's configured timezone.
+    - **Auth**: send `Authorization: Bearer <access token>` on every route except the public ones
+      (`/health`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/certificates/verify/{code}`).
+      A missing, invalid or expired token, or a deactivated account, yields `401 unauthorized`.
+      The refresh token is an httpOnly cookie `eduflow_refresh` (Path=/api/v1/auth, SameSite=Strict)
+      set by login/refresh and cleared by logout.
+    - **Roles**: `admin`, `instructor`, `mentor`, `tracker`, `student`. A user may hold several roles;
+      `role` on a user is the highest-priority one (admin > instructor > mentor > tracker > student).
+      "Course manager" below means an admin or the instructor assigned to the course. "Course staff" means
+      a course manager, or a mentor/tracker assigned to the course's track. Resources the caller cannot see
+      generally answer `404 not_found` rather than `403`.
+    - **Rate limits**: login (5 burst, 1 per 12s per IP), refresh (10 burst, 1 per 6s per IP) and
+      certificate verification (30 burst, 1 per second per IP) answer `429 rate_limited` with a
+      `Retry-After` header when exceeded.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+    description: Liveness and database readiness.
+  - name: Auth
+    description: Login, refresh-token rotation and logout.
+  - name: Users
+    description: User accounts, profiles, roles and the audit log.
+  - name: Learning
+    description: Tracks, courses, modules, lessons, enrollments and lesson progress.
+  - name: Sessions
+    description: Scheduled class sessions and course materials.
+  - name: Files
+    description: File uploads and downloads.
+  - name: Attendance
+    description: QR-based attendance windows, check-in and manual records.
+  - name: Assessment
+    description: Quizzes, quiz attempts, assignments and assignment submissions.
+  - name: Performance
+    description: Grade policies, computed grades, academic standing and at-risk students.
+  - name: Projects
+    description: Team projects, teams, GitHub repositories, presentations and project submissions.
+  - name: Communication
+    description: Notifications and announcements.
+  - name: Dashboard
+    description: Role-specific dashboard summaries.
+  - name: Certificates
+    description: Certificate requirements, eligibility, issuance, revocation and public verification.
+
+paths:
+  # ------------------------------------------------------------------ Health
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Public. Pings the database (2s timeout).
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Service and database are up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, database]
+                properties:
+                  status: { type: string, const: ok }
+                  database: { type: string, const: up }
+        '503':
+          description: Database unreachable (`database_unavailable`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ------------------------------------------------------------------ Auth
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      description: |
+        Public. Returns an access token and the caller's profile, and sets the httpOnly refresh cookie
+        `eduflow_refresh` (Path=/api/v1/auth). Rate limited per IP.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                password: { type: string, maxLength: 72 }
+      responses:
+        '200':
+          description: Logged in. Sets the `eduflow_refresh` cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetRefreshCookie' }
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Wrong email or password (`invalid_credentials`).
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: The account is deactivated (`account_disabled`).
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token and get a new access token
+      description: |
+        Public (authenticated by the `eduflow_refresh` cookie, no bearer token). The refresh token is
+        rotated: a new cookie is set and the old token becomes invalid. Rate limited per IP.
+      operationId: refreshSession
+      security:
+        - refreshCookie: []
+      responses:
+        '200':
+          description: New session. Sets a rotated `eduflow_refresh` cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetRefreshCookie' }
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Missing, expired, reused or revoked refresh token, or deactivated account (`invalid_refresh_token`). The cookie is cleared.
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      description: Public. Revokes the refresh token from the `eduflow_refresh` cookie (if any) and clears the cookie. Always succeeds.
+      operationId: logout
+      security:
+        - {}
+        - refreshCookie: []
+      responses:
+        '204':
+          description: Logged out; the refresh cookie is cleared.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/SetRefreshCookie' }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user's profile
+      description: Any authenticated user (self). Same body as `GET /users/me`.
+      operationId: getAuthMe
+      responses:
+        '200':
+          description: The caller's profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------ Users
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get my profile
+      description: Any authenticated user (self).
+      operationId: getMyProfile
+      responses:
+        '200':
+          description: The caller's profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Users]
+      summary: Update my profile
+      description: Any authenticated user (self). Only name, university and avatar can be changed. Absent fields are left unchanged.
+      operationId: updateMyProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                university: { type: string, maxLength: 200 }
+                avatar: { type: string, maxLength: 2048, description: 'http(s) URL, or empty string to clear.' }
+      responses:
+        '200':
+          description: Updated profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /users/me/password:
+    post:
+      tags: [Users]
+      summary: Change my password
+      description: Any authenticated user (self). `currentPassword` must be correct and `newPassword` must differ from it and meet the strength rules.
+      operationId: changeMyPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, maxLength: 72 }
+                newPassword: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '204': { description: Password changed. }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `currentPassword` "is incorrect", `newPassword` "must differ from the current password", or `password` too weak).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /users:
+    get:
+      tags: [Users]
+      summary: List users
+      description: |
+        Any authenticated user. Admins see every user; other users only see users they share a course or
+        track with (themselves, classmates' instructors/mentors/trackers, students of courses they teach or
+        supervise, colleagues on the same tracks).
+      operationId: listUsers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: role
+          in: query
+          schema: { $ref: '#/components/schemas/RoleName' }
+        - name: q
+          in: query
+          description: Case-insensitive search on name or email.
+          schema: { type: string }
+        - name: isActive
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Page of users.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Users]
+      summary: Create a user
+      description: Admin only.
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, roles]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                email: { type: string, format: email, maxLength: 254 }
+                password: { type: string, minLength: 8, maxLength: 72 }
+                roles:
+                  type: array
+                  minItems: 1
+                  maxItems: 5
+                  items: { $ref: '#/components/schemas/RoleName' }
+                university: { type: string, maxLength: 200 }
+                avatar: { type: string, maxLength: 2048, description: 'http(s) URL or empty string.' }
+      responses:
+        '201':
+          description: User created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Email already used (`email_taken`).
+  /users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Users]
+      summary: Get a user
+      description: Admin, the user themself, or a user who can see them (same visibility rules as `GET /users`).
+      operationId: getUser
+      responses:
+        '200':
+          description: The user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Users]
+      summary: Update a user
+      description: Admin only. An admin cannot change their own activation status (`self_modification`).
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                email: { type: string, format: email, maxLength: 254 }
+                university: { type: string, maxLength: 200 }
+                avatar: { type: string, maxLength: 2048 }
+                isActive: { type: boolean, description: Deactivating revokes the user's sessions. }
+      responses:
+        '200':
+          description: Updated user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not an admin (`forbidden`) or changing own activation (`self_modification`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Email already used (`email_taken`).
+  /users/{id}/roles:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Users]
+      summary: Replace a user's roles
+      description: Admin only. An admin cannot change their own roles (`self_modification`).
+      operationId: setUserRoles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  minItems: 1
+                  maxItems: 5
+                  items: { $ref: '#/components/schemas/RoleName' }
+      responses:
+        '200':
+          description: Updated user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not an admin (`forbidden`) or changing own roles (`self_modification`).
+        '404': { $ref: '#/components/responses/NotFound' }
+  /users/{id}/password:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Users]
+      summary: Reset a user's password
+      description: Admin only. Revokes the user's existing sessions.
+      operationId: resetUserPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '204': { description: Password reset. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /audit-logs:
+    get:
+      tags: [Users]
+      summary: List audit log entries
+      description: Admin only. Newest first.
+      operationId: listAuditLogs
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: action, in: query, description: 'Exact action, e.g. `user.created`.', schema: { type: string } }
+        - { name: targetType, in: query, description: 'e.g. `user`, `course`, `certificate`.', schema: { type: string } }
+        - { name: targetId, in: query, schema: { type: string, format: uuid } }
+        - { name: actorId, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Page of audit entries.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------ Learning: tracks
+  /tracks:
+    get:
+      tags: [Learning]
+      summary: List tracks
+      description: Any authenticated user. Admins see all tracks; others see active tracks plus tracks they mentor or track.
+      operationId: listTracks
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, active, archived] }
+      responses:
+        '200':
+          description: Page of tracks.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Track' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Learning]
+      summary: Create a track
+      description: Admin only. `status` defaults to `draft`.
+      operationId: createTrack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/TrackInput'
+                - required: [name]
+      responses:
+        '201':
+          description: Track created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Track' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: A track with this name exists (`track_name_taken`).
+  /tracks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Learning]
+      summary: Get a track
+      description: Any authenticated user who can see the track (admin, active track, or assigned mentor/tracker).
+      operationId: getTrack
+      responses:
+        '200':
+          description: The track.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Track' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Learning]
+      summary: Update a track
+      description: Admin only.
+      operationId: updateTrack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TrackInput' }
+      responses:
+        '200':
+          description: Updated track.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Track' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: A track with this name exists (`track_name_taken`).
+  /tracks/{id}/mentors:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Learning]
+      summary: Replace a track's mentors
+      description: Admin only. Every id must be an active user with the `mentor` role.
+      operationId: setTrackMentors
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StaffInput' }
+      responses:
+        '200':
+          description: Updated track.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Track' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /tracks/{id}/trackers:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Learning]
+      summary: Replace a track's trackers
+      description: Admin only. Every id must be an active user with the `tracker` role.
+      operationId: setTrackTrackers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StaffInput' }
+      responses:
+        '200':
+          description: Updated track.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Track' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Learning: courses
+  /courses:
+    get:
+      tags: [Learning]
+      summary: List courses
+      description: |
+        Any authenticated user; results are scoped. Admins see all; instructors see their own courses
+        (including drafts); students see non-draft courses they are enrolled in; mentors/trackers see
+        non-draft courses of their tracks.
+      operationId: listCourses
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: status, in: query, schema: { type: string, enum: [draft, published, archived] } }
+        - { name: trackId, in: query, schema: { type: string, format: uuid } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: q, in: query, description: Search on title/description., schema: { type: string } }
+      responses:
+        '200':
+          description: Page of courses.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Course' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Learning]
+      summary: Create a course
+      description: |
+        Admin or instructor. An instructor always becomes the course's instructor and may not set
+        `trackId` or another `instructorId` (403).
+      operationId: createCourse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/CourseInput'
+                - required: [title]
+      responses:
+        '201':
+          description: Course created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Course' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /courses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Learning]
+      summary: Get a course
+      description: Any authenticated user who can see the course (see `GET /courses`).
+      operationId: getCourse
+      responses:
+        '200':
+          description: The course.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Course' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Learning]
+      summary: Update a course
+      description: |
+        Course manager (admin or the course's instructor). Only admins may change `trackId`,
+        `instructorId` or set `removeTrack`.
+      operationId: updateCourse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CourseInput' }
+      responses:
+        '200':
+          description: Updated course.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Course' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/modules:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Learning]
+      summary: Get the course outline
+      description: |
+        Any user who can see the course. For an enrolled student, lesson `status` reflects their progress
+        (and `locked` when sequential unlock applies); for others lessons are `available`.
+      operationId: getCourseOutline
+      responses:
+        '200':
+          description: Modules with their lessons, in order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Module' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Learning]
+      summary: Add a module
+      description: Course manager (admin or the course's instructor). Returns the full updated outline.
+      operationId: createModule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ModuleInput'
+                - required: [title]
+      responses:
+        '201':
+          description: Updated outline.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Module' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/enrollments:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Learning]
+      summary: Enroll a student
+      description: Course manager (admin or the course's instructor). The user must be an active student.
+      operationId: enrollStudent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [studentId]
+              properties:
+                studentId: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Enrollment created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Enrollment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`already_enrolled` or `course_archived`.'
+  /courses/{id}/enrollments/{studentId}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/StudentIdPath'
+    delete:
+      tags: [Learning]
+      summary: Withdraw a student
+      description: Course manager (admin or the course's instructor). Marks the enrollment `withdrawn`.
+      operationId: withdrawStudent
+      responses:
+        '204': { description: Student withdrawn. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: The student is not enrolled (`not_enrolled`).
+  /modules/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Learning]
+      summary: Update or move a module
+      description: Course manager (admin or the course's instructor). Returns the full updated outline.
+      operationId: updateModule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModuleInput' }
+      responses:
+        '200':
+          description: Updated outline.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Module' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Learning]
+      summary: Delete an empty module
+      description: Course manager (admin or the course's instructor).
+      operationId: deleteModule
+      responses:
+        '204': { description: Module deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: The module still has lessons (`module_not_empty`).
+  /modules/{id}/lessons:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Learning]
+      summary: Add a lesson to a module
+      description: Course manager (admin or the course's instructor). Returns the full updated outline.
+      operationId: createLesson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/LessonInput'
+                - required: [title]
+      responses:
+        '201':
+          description: Updated outline.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Module' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /lessons/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Learning]
+      summary: Get a lesson with its content
+      description: Any user who can see the course. Students get `403 lesson_locked` for a lesson locked by sequential unlock.
+      operationId: getLesson
+      responses:
+        '200':
+          description: The lesson including `content` and `videoUrl`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lesson' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Lesson is locked (`lesson_locked`).
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Learning]
+      summary: Update or move a lesson
+      description: Course manager (admin or the course's instructor). Returns the full updated outline.
+      operationId: updateLesson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LessonInput' }
+      responses:
+        '200':
+          description: Updated outline.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Module' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Learning]
+      summary: Delete a lesson
+      description: Course manager (admin or the course's instructor). Lessons with student progress cannot be deleted.
+      operationId: deleteLesson
+      responses:
+        '204': { description: Lesson deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Students have progress on this lesson (`lesson_has_progress`).
+  /lessons/{id}/progress:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Learning]
+      summary: Record my progress on a lesson
+      description: Enrolled student (self). Completing the last lesson completes the enrollment.
+      operationId: recordLessonProgress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [in_progress, completed] }
+      responses:
+        '200':
+          description: The caller's updated enrollment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Enrollment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Lesson is locked (`lesson_locked`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`not_enrolled` or `course_archived`.'
+  /enrollments:
+    get:
+      tags: [Learning]
+      summary: List enrollments
+      description: |
+        Any authenticated user; scoped. Admins see all; instructors see enrollments of their courses;
+        mentors/trackers those of their tracks' courses; students their own. By default only active and
+        completed enrollments are returned; `status=all` includes withdrawn ones.
+      operationId: listEnrollments
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+        - $ref: '#/components/parameters/StudentIdQuery'
+        - { name: status, in: query, schema: { type: string, enum: [active, completed, withdrawn, all] } }
+      responses:
+        '200':
+          description: Page of enrollments.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Enrollment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------ Sessions & materials
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List class sessions
+      description: Any authenticated user; limited to sessions of courses the caller can see. Ordered by start time.
+      operationId: listSessions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+        - { name: from, in: query, description: RFC 3339 timestamp or YYYY-MM-DD., schema: { type: string } }
+        - { name: to, in: query, description: RFC 3339 timestamp or YYYY-MM-DD., schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [upcoming, completed, cancelled] } }
+      responses:
+        '200':
+          description: Page of sessions.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /sessions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Sessions]
+      summary: Get a session
+      description: Any user who can see the session's course.
+      operationId: getSession
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Sessions]
+      summary: Update or cancel a session
+      description: Course manager (admin or the course's instructor). `cancelled=true` cancels the session.
+      operationId: updateSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionInput' }
+      responses:
+        '200':
+          description: Updated session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Sessions]
+      summary: Schedule a session
+      description: |
+        Course manager (admin or the course's instructor). `endsAt` must be after `startsAt` and within
+        12 hours. Enrolled students are notified.
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/SessionInput'
+                - required: [title, startsAt, endsAt]
+      responses:
+        '201':
+          description: Session created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/materials:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Sessions]
+      summary: List course materials
+      description: Any user who can see the course.
+      operationId: listMaterials
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: sessionId, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Page of materials.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Material' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Sessions]
+      summary: Add a material
+      description: |
+        Course manager (admin or the course's instructor). Provide exactly one of `url` or `fileId`
+        (a file uploaded by the caller). `sessionId` must belong to the same course.
+      operationId: createMaterial
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 160 }
+                description: { type: string, maxLength: 5000 }
+                url: { type: string, format: uri, maxLength: 2048 }
+                fileId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Material created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Material' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /materials/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Sessions]
+      summary: Update a material
+      description: Course manager (admin or the course's instructor). The source (url/file) cannot be changed; `removeSession` detaches it from its session.
+      operationId: updateMaterial
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, minLength: 1, maxLength: 160 }
+                description: { type: string, maxLength: 5000 }
+                sessionId: { type: string, format: uuid }
+                removeSession: { type: boolean }
+      responses:
+        '200':
+          description: Updated material.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Material' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Sessions]
+      summary: Delete a material
+      description: Course manager (admin or the course's instructor).
+      operationId: deleteMaterial
+      responses:
+        '204': { description: Material deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Files
+  /files:
+    post:
+      tags: [Files]
+      summary: Upload a file
+      description: |
+        Any authenticated user; the caller becomes the owner. `multipart/form-data` with a single part
+        named `file`. Allowed extensions: pdf, docx, pptx, xlsx, zip, txt, md, png, jpg, jpeg (content is
+        sniffed). The maximum size is server-configured.
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '201':
+          description: File stored.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Not multipart / malformed (`invalid_body`), or missing/empty `file` (`validation_error`).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /files/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Files]
+      summary: Get file metadata
+      description: |
+        The owner, an admin, or a user allowed through an attachment (course material visible to them,
+        a submission they own or staff, a project submission of their team or staffed course).
+      operationId: getFile
+      responses:
+        '200':
+          description: File metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Files]
+      summary: Delete a file
+      description: The owner or an admin. Files still referenced by materials or submissions cannot be deleted.
+      operationId: deleteFile
+      responses:
+        '204': { description: File deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: The file is still attached to other records (`file_in_use`).
+  /files/{id}/download:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Files]
+      summary: Download a file
+      description: Same access as `GET /files/{id}`. Served as an attachment; supports HTTP range requests.
+      operationId: downloadFile
+      responses:
+        '200':
+          description: File content. The actual `Content-Type` is the stored file's type.
+          headers:
+            Content-Disposition: { schema: { type: string }, description: 'attachment; filename="..."' }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: Partial content (range request).
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Attendance
+  /sessions/{id}/attendance/start:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Attendance]
+      summary: Open (or reopen) attendance for a session
+      description: Course manager (admin or the course's instructor). The body is optional. Returns the window with the current QR token.
+      operationId: startAttendance
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                graceMinutes: { type: integer, minimum: 0, maximum: 240, description: Minutes after start before check-ins count as late. }
+      responses:
+        '200':
+          description: Open window including `token` and `tokenExpiresAt`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Window' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`session_cancelled` or `attendance_closed`.'
+  /sessions/{id}/attendance/token:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Attendance]
+      summary: Get the current rotating QR token
+      description: Course manager (admin or the course's instructor). Tokens rotate every few seconds (`tokenTtlSeconds`).
+      operationId: getAttendanceToken
+      responses:
+        '200':
+          description: Open window including a fresh `token`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Window' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`attendance_not_started` or `attendance_closed`.'
+  /sessions/{id}/attendance/close:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Attendance]
+      summary: Close attendance
+      description: Course manager (admin or the course's instructor). Enrolled students without a record are marked `absent` (method `auto`).
+      operationId: closeAttendance
+      responses:
+        '200':
+          description: Closed window.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Window' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`attendance_not_started` or `attendance_closed`.'
+  /sessions/{id}/attendance:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Attendance]
+      summary: Get the attendance window and summary
+      description: Course staff (course manager, or mentor/tracker of the course's track). No token is included.
+      operationId: getAttendanceWindow
+      responses:
+        '200':
+          description: The window with summary counts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Window' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Attendance has not been started (`attendance_not_started`).
+  /sessions/{id}/attendance/records:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Attendance]
+      summary: List attendance records of a session
+      description: Course staff (course manager, or mentor/tracker of the course's track).
+      operationId: listSessionAttendance
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AttendanceStatus' } }
+      responses:
+        '200':
+          description: Page of records.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AttendanceRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Attendance]
+      summary: Record attendance manually
+      description: Course manager (admin or the course's instructor). The student must be enrolled; a reason is required.
+      operationId: recordAttendanceManually
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [studentId, status, reason]
+              properties:
+                studentId: { type: string, format: uuid }
+                status: { $ref: '#/components/schemas/AttendanceStatus' }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        '201':
+          description: Record created (method `manual`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendanceRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`already_checked_in` (a record exists; correct it instead) or `session_cancelled`.'
+  /attendance/records/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Attendance]
+      summary: Correct an attendance record
+      description: Course manager (admin or the course's instructor). A reason is required and is audited.
+      operationId: correctAttendance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, reason]
+              properties:
+                status: { $ref: '#/components/schemas/AttendanceStatus' }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        '200':
+          description: Updated record.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendanceRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /attendance/check-in:
+    post:
+      tags: [Attendance]
+      summary: Check in with a scanned QR token
+      description: Student enrolled in the session's course (self). Status is `present`, or `late` after the grace period.
+      operationId: checkIn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, maxLength: 128 }
+      responses:
+        '201':
+          description: Check-in recorded (method `qr`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendanceRecord' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`attendance_token_invalid`, `attendance_token_expired` or `validation_error`.'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not a student (`forbidden`) or not enrolled in the course (`not_enrolled`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`already_checked_in`, `attendance_closed`, `attendance_not_started` or `session_cancelled`.'
+  /students/{id}/attendance:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Attendance]
+      summary: List a student's attendance records
+      description: Self, admin, or an instructor/mentor/tracker who can see the student.
+      operationId: listStudentAttendance
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+      responses:
+        '200':
+          description: Page of records.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AttendanceRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /students/{id}/attendance/summary:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Attendance]
+      summary: Get a student's attendance summary
+      description: Self, admin, or an instructor/mentor/tracker who can see the student.
+      operationId: getStudentAttendanceSummary
+      parameters:
+        - $ref: '#/components/parameters/CourseIdQuery'
+      responses:
+        '200':
+          description: Summary counts and rate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Assessment: quizzes
+  /quizzes:
+    get:
+      tags: [Assessment]
+      summary: List quizzes
+      description: |
+        Any authenticated user; scoped to visible courses. Students only see published quizzes and get
+        `attemptsUsed` / `bestPercentage`.
+      operationId: listQuizzes
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+      responses:
+        '200':
+          description: Page of quizzes.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Quiz' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /courses/{id}/quizzes:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Assessment]
+      summary: Create a quiz
+      description: Course manager (admin or the course's instructor). Quizzes are created as drafts; `status` is ignored here.
+      operationId: createQuiz
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/QuizInput'
+                - required: [title]
+      responses:
+        '201':
+          description: Quiz created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quiz' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /quizzes/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Assessment]
+      summary: Get a quiz
+      description: Any user who can see the quiz (students only published quizzes of courses they are enrolled in).
+      operationId: getQuiz
+      responses:
+        '200':
+          description: The quiz.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quiz' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Assessment]
+      summary: Update or publish a quiz
+      description: |
+        Course manager (admin or the course's instructor). Publishing requires valid questions and
+        notifies enrolled students.
+      operationId: updateQuiz
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QuizInput' }
+      responses:
+        '200':
+          description: Updated quiz.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quiz' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `questions` or `dueAt`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: The quiz already has attempts and cannot be changed that way (`quiz_has_attempts`).
+  /quizzes/{id}/questions:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Assessment]
+      summary: Get quiz questions with answers
+      description: Course staff (course manager, or mentor/tracker of the course's track). Options include `isCorrect`.
+      operationId: getQuizQuestions
+      responses:
+        '200':
+          description: Questions in order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Question' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Assessment]
+      summary: Replace all quiz questions
+      description: |
+        Course manager (admin or the course's instructor). Every question needs 2-10 options and exactly one
+        correct option. Not allowed once the quiz has attempts.
+      operationId: replaceQuizQuestions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [questions]
+              properties:
+                questions:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [text, options]
+                    properties:
+                      text: { type: string, minLength: 1, maxLength: 2000 }
+                      points: { type: integer, minimum: 1, maximum: 100, description: Defaults to 1. }
+                      options:
+                        type: array
+                        minItems: 2
+                        maxItems: 10
+                        items:
+                          type: object
+                          required: [text]
+                          properties:
+                            text: { type: string, minLength: 1, maxLength: 500 }
+                            correct: { type: boolean }
+      responses:
+        '200':
+          description: The new questions (with `isCorrect`).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Question' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `questions`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`quiz_has_attempts`.'
+  /quizzes/{id}/attempts:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Assessment]
+      summary: Start (or resume) an attempt
+      description: |
+        Enrolled student (self). Returns the in-progress attempt if one exists (200) or starts a new one
+        (201). The attempt includes `questions` without correct answers.
+      operationId: startQuizAttempt
+      responses:
+        '200':
+          description: Existing in-progress attempt resumed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attempt' }
+        '201':
+          description: New attempt started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attempt' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not a student (`forbidden`) or not enrolled (`not_enrolled`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`quiz_not_open` or `attempt_limit_reached`.'
+    get:
+      tags: [Assessment]
+      summary: List attempts of a quiz
+      description: Course staff see all attempts; students who can see the quiz see only their own.
+      operationId: listQuizAttempts
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of attempts, newest first.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Attempt' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /attempts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Assessment]
+      summary: Get an attempt
+      description: |
+        The attempt's student or course staff. Correct answers are revealed to staff, and to the student
+        according to the quiz's `revealAnswers` policy once the attempt is finished.
+      operationId: getAttempt
+      responses:
+        '200':
+          description: The attempt with answers.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attempt' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /attempts/{id}/submit:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Assessment]
+      summary: Submit an attempt
+      description: The attempt's student (self). Scored server-side. Each question may be answered at most once.
+      operationId: submitAttempt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                answers:
+                  type: array
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [questionId, optionId]
+                    properties:
+                      questionId: { type: string, format: uuid }
+                      optionId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The scored attempt.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attempt' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `answers`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`attempt_closed` or `attempt_expired`.'
+
+  # ------------------------------------------------------------------ Assessment: assignments
+  /assignments:
+    get:
+      tags: [Assessment]
+      summary: List assignments
+      description: Any authenticated user; scoped to visible courses (students see published assignments only).
+      operationId: listAssignments
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+      responses:
+        '200':
+          description: Page of assignments.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Assignment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /courses/{id}/assignments:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Assessment]
+      summary: Create an assignment
+      description: Course manager (admin or the course's instructor). Publishing notifies enrolled students.
+      operationId: createAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/AssignmentInput'
+                - required: [title, dueAt]
+      responses:
+        '201':
+          description: Assignment created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (e.g. details on `latePolicy`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /assignments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Assessment]
+      summary: Get an assignment
+      description: Any user who can see the assignment.
+      operationId: getAssignment
+      responses:
+        '200':
+          description: The assignment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Assessment]
+      summary: Update or publish an assignment
+      description: Course manager (admin or the course's instructor).
+      operationId: updateAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignmentInput' }
+      responses:
+        '200':
+          description: Updated assignment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /assignments/{id}/submissions:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Assessment]
+      summary: Submit work for an assignment
+      description: |
+        Enrolled student (self). Provide at least one of `fileId` (uploaded by the caller), `url`, `text`,
+        each allowed by the assignment's `submissionTypes`. Each submission creates a new version and
+        supersedes the previous ungraded one.
+      operationId: submitAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fileId: { type: string, format: uuid }
+                url: { type: string, format: uri, maxLength: 2048 }
+                text: { type: string, minLength: 1, maxLength: 50000 }
+      responses:
+        '201':
+          description: Submission created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Submission' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `submission` or `fileId`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not a student (`forbidden`) or not enrolled (`not_enrolled`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`assignment_not_open`, `deadline_passed` or `already_graded`.'
+  /submissions:
+    get:
+      tags: [Assessment]
+      summary: List assignment submissions
+      description: |
+        Any authenticated user; scoped. Students see their own; course staff see their courses'.
+        Only the latest version per student is returned unless `allVersions=true`.
+      operationId: listSubmissions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: assignmentId, in: query, schema: { type: string, format: uuid } }
+        - $ref: '#/components/parameters/CourseIdQuery'
+        - $ref: '#/components/parameters/StudentIdQuery'
+        - { name: status, in: query, schema: { type: string, enum: [submitted, graded, returned] } }
+        - { name: allVersions, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Page of submissions.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Submission' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /submissions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Assessment]
+      summary: Get an assignment submission
+      description: The submitting student or course staff.
+      operationId: getSubmission
+      responses:
+        '200':
+          description: The submission.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Submission' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /submissions/{id}/grade:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Assessment]
+      summary: Grade an assignment submission
+      description: |
+        Course manager (admin or the course's instructor). Only the latest version can be graded. Changing
+        an existing grade requires `reason`. `returnForRevision` sets the status to `returned`. The student
+        is notified.
+      operationId: gradeSubmission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grade]
+              properties:
+                grade: { type: number, minimum: 0, description: 'Between 0 and the assignment maxGrade.' }
+                feedback: { type: string, maxLength: 10000 }
+                returnForRevision: { type: boolean }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Graded submission.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Submission' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `grade` or `reason`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`not_latest_submission`.'
+
+  # ------------------------------------------------------------------ Performance
+  /courses/{id}/grade-policy:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Performance]
+      summary: Get the current grade policy
+      description: Any user who can see the course. Returns the default policy (`isDefault=true`) if none was set.
+      operationId: getGradePolicy
+      responses:
+        '200':
+          description: Current policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Policy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Performance]
+      summary: Set a new grade policy version
+      description: |
+        Course manager (admin or the course's instructor). Weights must add up to 100; probation thresholds
+        must not exceed warning thresholds. Omitted thresholds take the defaults (warning 60/75, probation
+        50/60, warningMissing 2). Creates a new version.
+      operationId: setGradePolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quizWeight, assignmentWeight, attendanceWeight, projectWeight]
+              properties:
+                quizWeight: { type: integer, minimum: 0, maximum: 100 }
+                assignmentWeight: { type: integer, minimum: 0, maximum: 100 }
+                attendanceWeight: { type: integer, minimum: 0, maximum: 100 }
+                projectWeight: { type: integer, minimum: 0, maximum: 100 }
+                warningGrade: { type: integer, minimum: 0, maximum: 100 }
+                probationGrade: { type: integer, minimum: 0, maximum: 100 }
+                warningAttendance: { type: integer, minimum: 0, maximum: 100 }
+                probationAttendance: { type: integer, minimum: 0, maximum: 100 }
+                warningMissing: { type: integer, minimum: 1, maximum: 100 }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: The new policy version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Policy' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on fields, or `weights`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/grade-policy/versions:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Performance]
+      summary: List grade policy versions
+      description: Course manager (admin or the course's instructor). Not paginated; `X-Total-Count` is the array length.
+      operationId: listGradePolicyVersions
+      responses:
+        '200':
+          description: All versions, newest first.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Policy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/standing:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Performance]
+      summary: Standing of every student in a course
+      description: Course staff (course manager, or mentor/tracker of the course's track). `standing=at_risk` returns warning and probation.
+      operationId: getCourseStanding
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: standing, in: query, schema: { type: string, enum: [good, warning, probation, at_risk] } }
+      responses:
+        '200':
+          description: Page of student standings.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StudentStanding' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/standing/snapshots:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Performance]
+      summary: Record a standing snapshot for a course
+      description: Course manager (admin or the course's instructor).
+      operationId: snapshotCourseStanding
+      responses:
+        '201':
+          description: Number of snapshots written.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [courseId, snapshots]
+                properties:
+                  courseId: { type: string, format: uuid }
+                  snapshots: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /students/{id}/grades:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Performance]
+      summary: A student's computed grades
+      description: Self, admin, or an instructor/mentor/tracker who can see the student. Courses are limited to those the caller can see.
+      operationId: getStudentGrades
+      responses:
+        '200':
+          description: Per-course grades, GPA and overall standing.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentGrades' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /students/{id}/standing:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Performance]
+      summary: A student's academic standing
+      description: Self, admin, or an instructor/mentor/tracker who can see the student.
+      operationId: getStudentStanding
+      responses:
+        '200':
+          description: Overall and per-course standing.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentStandingSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /at-risk:
+    get:
+      tags: [Performance]
+      summary: Students at risk across my courses
+      description: Admin, instructor, mentor or tracker; scoped to the courses the caller can see. Warning and probation students only.
+      operationId: listAtRisk
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of at-risk standings.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StudentStanding' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------ Projects
+  /projects:
+    get:
+      tags: [Projects]
+      summary: List projects
+      description: Any authenticated user; scoped to visible courses (students see published projects only and get `myTeamId`).
+      operationId: listProjects
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+      responses:
+        '200':
+          description: Page of projects.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /courses/{id}/projects:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Projects]
+      summary: Create a project
+      description: Course manager (admin or the course's instructor).
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ProjectInput'
+                - required: [title, dueAt]
+      responses:
+        '201':
+          description: Project created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /projects/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Projects]
+      summary: Get a project
+      description: Any user who can see the project.
+      operationId: getProject
+      responses:
+        '200':
+          description: The project.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Projects]
+      summary: Update or publish a project
+      description: Course manager (admin or the course's instructor).
+      operationId: updateProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectInput' }
+      responses:
+        '200':
+          description: Updated project.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /projects/{id}/teams:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Projects]
+      summary: List a project's teams
+      description: Any user who can see the project. Not paginated; `X-Total-Count` is the array length.
+      operationId: listProjectTeams
+      responses:
+        '200':
+          description: All teams.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Team' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Projects]
+      summary: Create a team (and join it)
+      description: Enrolled student (self). The creator becomes the first member.
+      operationId: createTeam
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+      responses:
+        '201':
+          description: Team created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not a student (`forbidden`) or not enrolled (`not_enrolled`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`project_not_open`, `already_in_team` or `team_name_taken`.'
+  /projects/{id}/submissions:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Projects]
+      summary: Submit the team's project
+      description: |
+        Enrolled student who is in a team for the project. Provide `repoUrl` and/or `fileId` (uploaded by the
+        caller). Resubmission is only allowed when the project allows it and the latest is not graded.
+      operationId: submitProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                repoUrl: { type: string, format: uri, maxLength: 2048 }
+                fileId: { type: string, format: uuid }
+                notes: { type: string, maxLength: 10000 }
+      responses:
+        '201':
+          description: Submission created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectSubmission' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `repoUrl` or `fileId`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Not a student (`forbidden`) or not enrolled (`not_enrolled`).
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`project_not_open`, `team_required`, `already_graded` or `resubmission_not_allowed`.'
+  /teams/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Projects]
+      summary: Get a team
+      description: Any user who can see the team's project.
+      operationId: getTeam
+      responses:
+        '200':
+          description: The team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /teams/{id}/members:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Projects]
+      summary: Join a team or add a member
+      description: |
+        Without `studentId` (or with the caller's id) an enrolled student joins the team. With another
+        `studentId`, a course manager (admin or the course's instructor) adds that student. The body is optional.
+      operationId: addTeamMember
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                studentId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Updated team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`forbidden` or `not_enrolled`.'
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`already_in_team`, `team_full` or `team_locked`.'
+  /teams/{id}/members/{studentId}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/StudentIdPath'
+    delete:
+      tags: [Projects]
+      summary: Leave a team or remove a member
+      description: The member themself (leave) or a course manager (admin or the course's instructor).
+      operationId: removeTeamMember
+      responses:
+        '204': { description: Member removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Membership cannot change after a submission (`team_locked`).
+  /teams/{id}/repository:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Projects]
+      summary: Link a GitHub repository
+      description: |
+        A team member or course staff. URL must look like `https://github.com/{owner}/{repo}`. Metadata is
+        fetched from GitHub; failures are reported in `repository.syncError` rather than as an error.
+      operationId: linkTeamRepository
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, maxLength: 300 }
+      responses:
+        '200':
+          description: Updated team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `url`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /teams/{id}/repository/sync:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Projects]
+      summary: Refresh repository metadata from GitHub
+      description: A team member or course staff. Returns 404 if no repository is linked.
+      operationId: syncTeamRepository
+      responses:
+        '200':
+          description: Updated team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /teams/{id}/presentation:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Projects]
+      summary: Schedule (or reschedule) the team presentation
+      description: Course manager (admin or the course's instructor). Only for projects with `requiresPresentation`.
+      operationId: scheduleTeamPresentation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduledAt]
+              properties:
+                scheduledAt: { type: string, format: date-time }
+                location: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: Updated team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`presentation_not_required`.'
+  /presentations/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Projects]
+      summary: Update a presentation's status or feedback
+      description: Course manager (admin or the course's instructor).
+      operationId: updatePresentation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [scheduled, done, cancelled] }
+                feedback: { type: string, maxLength: 10000 }
+      responses:
+        '200':
+          description: Updated team.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Team' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /project-submissions:
+    get:
+      tags: [Projects]
+      summary: List project submissions
+      description: |
+        Any authenticated user; scoped. Students see their teams' submissions; course staff see their
+        courses'. Only the latest version per team unless `allVersions=true`.
+      operationId: listProjectSubmissions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: projectId, in: query, schema: { type: string, format: uuid } }
+        - { name: teamId, in: query, schema: { type: string, format: uuid } }
+        - { name: allVersions, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Page of submissions.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectSubmission' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /project-submissions/{id}/grade:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Projects]
+      summary: Grade a project submission
+      description: |
+        Course manager (admin or the course's instructor). Only the latest version can be graded.
+        `criteriaScores` keys are criterion titles. Changing an existing grade requires `reason`.
+      operationId: gradeProjectSubmission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grade]
+              properties:
+                grade: { type: number, minimum: 0, description: Between 0 and the project maxGrade. }
+                criteriaScores:
+                  type: object
+                  additionalProperties: { type: integer }
+                feedback: { type: string, maxLength: 10000 }
+                returnForRevision: { type: boolean }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Graded submission.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectSubmission' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error` (details on `grade`, `criteriaScores` or `reason`).'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`not_latest_submission`.'
+
+  # ------------------------------------------------------------------ Communication
+  /notifications:
+    get:
+      tags: [Communication]
+      summary: List my notifications
+      description: Any authenticated user (self). Newest first. `X-Unread-Count` carries the caller's total unread count.
+      operationId: listNotifications
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: unread, in: query, description: Only unread notifications when true., schema: { type: boolean } }
+      responses:
+        '200':
+          description: Page of notifications.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+            X-Unread-Count: { $ref: '#/components/headers/XUnreadCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Notification' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /notifications/{id}/read:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Communication]
+      summary: Mark a notification as read
+      description: The notification's recipient (self). Idempotent.
+      operationId: markNotificationRead
+      responses:
+        '200':
+          description: The notification.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /notifications/read-all:
+    post:
+      tags: [Communication]
+      summary: Mark all my notifications as read
+      description: Any authenticated user (self).
+      operationId: markAllNotificationsRead
+      responses:
+        '200':
+          description: Number of notifications updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /announcements:
+    get:
+      tags: [Communication]
+      summary: List announcements
+      description: |
+        Any authenticated user. Returns global announcements targeted at the caller's roles (or all roles)
+        and announcements of courses the caller can see. Newest first.
+      operationId: listAnnouncements
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+      responses:
+        '200':
+          description: Page of announcements.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Announcement' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Communication]
+      summary: Post an announcement
+      description: |
+        Admin (global or for any visible course) or instructor (only for a course they manage; `courseId`
+        is required). Empty `targetRoles` means everyone in scope. Recipients are notified.
+      operationId: createAnnouncement
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, content]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                content: { type: string, minLength: 1, maxLength: 20000 }
+                courseId: { type: string, format: uuid }
+                targetRoles:
+                  type: array
+                  maxItems: 5
+                  items: { $ref: '#/components/schemas/RoleName' }
+      responses:
+        '201':
+          description: Announcement created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Announcement' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /announcements/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      tags: [Communication]
+      summary: Delete an announcement
+      description: Admin or the announcement's author.
+      operationId: deleteAnnouncement
+      responses:
+        '204': { description: Announcement deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Dashboard
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Role-specific dashboard
+      description: |
+        Any authenticated user. `role` selects which dashboard (defaults to the caller's primary role); the
+        caller must hold that role (403 otherwise). The body shape depends on the role; see the
+        `*Dashboard` schemas.
+      operationId: getDashboard
+      parameters:
+        - name: role
+          in: query
+          schema: { $ref: '#/components/schemas/RoleName' }
+      responses:
+        '200':
+          description: Dashboard data for the selected role.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/StudentDashboard'
+                  - $ref: '#/components/schemas/InstructorDashboard'
+                  - $ref: '#/components/schemas/StaffDashboard'
+                  - $ref: '#/components/schemas/AdminDashboard'
+                discriminator:
+                  propertyName: role
+                  mapping:
+                    student: '#/components/schemas/StudentDashboard'
+                    instructor: '#/components/schemas/InstructorDashboard'
+                    mentor: '#/components/schemas/StaffDashboard'
+                    tracker: '#/components/schemas/StaffDashboard'
+                    admin: '#/components/schemas/AdminDashboard'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------ Certificates
+  /certificates/verify/{code}:
+    parameters:
+      - name: code
+        in: path
+        required: true
+        description: The certificate's verification code.
+        schema: { type: string }
+    get:
+      tags: [Certificates]
+      summary: Publicly verify a certificate
+      description: Public, rate limited per IP. Returns only non-sensitive fields; revoked certificates are returned with `status=revoked`.
+      operationId: verifyCertificate
+      security: []
+      responses:
+        '200':
+          description: Certificate found.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicCertificate' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /courses/{id}/certificate-requirements:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Certificates]
+      summary: Get a course's certificate requirements
+      description: Any user who can see the course. Defaults are returned (`isDefault=true`) if none were set.
+      operationId: getCertificateRequirements
+      responses:
+        '200':
+          description: Requirements.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Requirements' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Certificates]
+      summary: Set a course's certificate requirements
+      description: Admin only.
+      operationId: setCertificateRequirements
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minGrade, minAttendance, requireAllLessons, allowProbation]
+              properties:
+                minGrade: { type: integer, minimum: 0, maximum: 100 }
+                minAttendance: { type: integer, minimum: 0, maximum: 100 }
+                requireAllLessons: { type: boolean }
+                allowProbation: { type: boolean }
+      responses:
+        '200':
+          description: Updated requirements.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Requirements' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /courses/{id}/certificate-eligibility:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Certificates]
+      summary: Certificate eligibility of every student in a course
+      description: Course staff (course manager, or mentor/tracker of the course's track). Not paginated; `X-Total-Count` is the array length.
+      operationId: getCourseCertificateEligibility
+      responses:
+        '200':
+          description: Eligibility per enrolled student.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Eligibility' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /students/{id}/certificate-eligibility:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Certificates]
+      summary: A student's certificate eligibility for a course
+      description: The student themself (for a course they can see) or course staff.
+      operationId: getStudentCertificateEligibility
+      parameters:
+        - name: courseId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Eligibility.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Eligibility' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`validation_error`: `courseId` missing/invalid, or `studentId` not enrolled in the course.'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /certificates/issue:
+    post:
+      tags: [Certificates]
+      summary: Issue certificates
+      description: |
+        Admin only. With `studentId`, issues for that student (409 `not_eligible` with `details.reasons`
+        if not eligible, 409 `already_issued` if an active certificate exists). Without it, issues for every
+        eligible student of the course and reports the skipped ones. Status is 201 when at least one
+        certificate was issued, 200 otherwise. Students are notified.
+      operationId: issueCertificates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [courseId]
+              properties:
+                courseId: { type: string, format: uuid }
+                studentId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Nothing issued (all skipped).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueResult' }
+        '201':
+          description: At least one certificate issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`not_eligible` (details: `{"reasons": [...]}`) or `already_issued`.'
+  /certificates:
+    get:
+      tags: [Certificates]
+      summary: List certificates
+      description: Any authenticated user; scoped. Admins see all; students their own; course staff those of their courses.
+      operationId: listCertificates
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/CourseIdQuery'
+        - $ref: '#/components/parameters/StudentIdQuery'
+        - { name: status, in: query, schema: { type: string, enum: [issued, revoked] } }
+      responses:
+        '200':
+          description: Page of certificates.
+          headers:
+            X-Total-Count: { $ref: '#/components/headers/XTotalCount' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Certificate' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /certificates/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Certificates]
+      summary: Get a certificate
+      description: Admin, the certificate's student, or course staff.
+      operationId: getCertificate
+      responses:
+        '200':
+          description: The certificate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certificate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /certificates/{id}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Certificates]
+      summary: Revoke a certificate
+      description: Admin only. Only `issued` certificates can be revoked.
+      operationId: revokeCertificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonInput' }
+      responses:
+        '200':
+          description: Revoked certificate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certificate' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`invalid_certificate_state`.'
+  /certificates/{id}/reinstate:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Certificates]
+      summary: Reinstate a revoked certificate
+      description: Admin only. Only `revoked` certificates can be reinstated, and not if another active certificate exists.
+      operationId: reinstateCertificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonInput' }
+      responses:
+        '200':
+          description: Reinstated certificate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certificate' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`invalid_certificate_state` or `already_issued`.'
+  /certificates/{id}/events:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Certificates]
+      summary: Certificate history
+      description: Admin only. Issue/revoke/reinstate events, oldest first.
+      operationId: listCertificateEvents
+      responses:
+        '200':
+          description: Events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CertificateEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived access token from `/auth/login` or `/auth/refresh`.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: eduflow_refresh
+      description: httpOnly, SameSite=Strict refresh-token cookie scoped to Path=/api/v1/auth. Rotated on every refresh.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: Resource UUID. A non-UUID value yields 404.
+      schema: { type: string, format: uuid }
+    StudentIdPath:
+      name: studentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      description: 1-based page number.
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      description: Page size (max 100).
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    CourseIdQuery:
+      name: courseId
+      in: query
+      description: Filter by course.
+      schema: { type: string, format: uuid }
+    StudentIdQuery:
+      name: studentId
+      in: query
+      description: Filter by student.
+      schema: { type: string, format: uuid }
+
+  headers:
+    XTotalCount:
+      description: Total number of items matching the query (across all pages).
+      schema: { type: integer, minimum: 0 }
+    XUnreadCount:
+      description: Total number of the caller's unread notifications.
+      schema: { type: integer, minimum: 0 }
+    Location:
+      description: URL of the created resource (`/api/v1/...`).
+      schema: { type: string }
+    SetRefreshCookie:
+      description: '`eduflow_refresh=<token>; Path=/api/v1/auth; HttpOnly; SameSite=Strict` (Max-Age=-1 when cleared).'
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid input (`validation_error` with field details, or `invalid_body`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: Some fields are invalid, code: validation_error, details: { title: is required } }
+    Unauthorized:
+      description: Missing or invalid credentials (`unauthorized`).
+      headers:
+        WWW-Authenticate: { schema: { type: string }, description: 'Bearer realm="eduflow"' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: Authentication required, code: unauthorized }
+    Forbidden:
+      description: The caller lacks permission (`forbidden`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: You do not have permission to perform this action, code: forbidden }
+    NotFound:
+      description: Resource not found or not visible to the caller (`not_found`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: Resource not found, code: not_found }
+    Conflict:
+      description: The request conflicts with the resource's current state.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: The file exceeds the maximum size (`file_too_large`, details `{maxBytes}`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: The file exceeds the maximum allowed size, code: file_too_large, details: { maxBytes: 10485760 } }
+    UnsupportedMediaType:
+      description: File type not allowed (`unsupported_file_type`, details `{allowed}`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: This file type is not allowed, code: unsupported_file_type, details: { allowed: 'pdf, docx, pptx, xlsx, zip, txt, md, png, jpg, jpeg' } }
+    TooManyRequests:
+      description: Rate limit exceeded (`rate_limited`).
+      headers:
+        Retry-After: { schema: { type: integer }, description: Seconds to wait before retrying. }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: 'Too many requests, please try again later', code: rate_limited }
+
+  schemas:
+    # ---------------------------------------------------------------- common
+    Error:
+      type: object
+      required: [message, code]
+      properties:
+        message: { type: string, description: Human-readable message. }
+        code: { type: string, description: 'Stable machine-readable code, e.g. `validation_error`, `not_found`, `already_enrolled`.' }
+        details:
+          type: object
+          description: Extra data, e.g. a map of camelCase field name to validation message.
+          additionalProperties: true
+    RoleName:
+      type: string
+      enum: [admin, instructor, mentor, tracker, student]
+    ReasonInput:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 3, maxLength: 500 }
+
+    # ---------------------------------------------------------------- identity
+    User:
+      type: object
+      required: [id, name, email, role, roles, avatar, university, isActive, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/RoleName', description: Highest-priority role. }
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/RoleName' }
+        avatar: { type: [string, 'null'] }
+        university: { type: [string, 'null'] }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    ProfileResponse:
+      description: A user plus role-dependent extras. Extras are omitted when empty / not applicable.
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          properties:
+            enrolledCourses:
+              type: array
+              description: Students only. Ids of non-draft courses with an active or completed enrollment.
+              items: { type: string, format: uuid }
+            track:
+              type: string
+              description: Students only. Name of the track most of their enrollments belong to.
+            courses:
+              type: array
+              description: Instructors only. Ids of courses they teach.
+              items: { type: string, format: uuid }
+            tracks:
+              type: array
+              description: Mentors/trackers only. Ids of tracks they are assigned to.
+              items: { type: string, format: uuid }
+    AuthSession:
+      type: object
+      required: [token, tokenType, expiresIn, user]
+      properties:
+        token: { type: string, description: JWT access token. }
+        tokenType: { type: string, const: Bearer }
+        expiresIn: { type: integer, description: Access token lifetime in seconds. }
+        user: { $ref: '#/components/schemas/ProfileResponse' }
+    AuditEntry:
+      type: object
+      required: [id, actorId, actorName, action, targetType, targetId, context, ipAddress, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        actorId: { type: [string, 'null'], format: uuid }
+        actorName: { type: [string, 'null'] }
+        action: { type: string, examples: [user.created, user.roles_changed, course.updated, certificate.issued] }
+        targetType: { type: string }
+        targetId: { type: [string, 'null'] }
+        context: { type: object, additionalProperties: true }
+        ipAddress: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    # ---------------------------------------------------------------- learning
+    TrackInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        status: { type: string, enum: [draft, active, archived] }
+    StaffInput:
+      type: object
+      required: [userIds]
+      properties:
+        userIds:
+          type: array
+          maxItems: 20
+          items: { type: string, format: uuid }
+    Track:
+      type: object
+      required: [id, name, description, status, courses, totalStudents, mentorId, trackerId, mentorIds, trackerIds, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [draft, active, archived] }
+        courses:
+          type: array
+          description: Ids of the track's courses.
+          items: { type: string, format: uuid }
+        totalStudents: { type: integer }
+        mentorId: { type: [string, 'null'], format: uuid, description: First mentor (convenience). }
+        trackerId: { type: [string, 'null'], format: uuid, description: First tracker (convenience). }
+        mentorIds: { type: array, items: { type: string, format: uuid } }
+        trackerIds: { type: array, items: { type: string, format: uuid } }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CourseInput:
+      type: object
+      properties:
+        trackId: { type: string, format: uuid, description: Admin only. }
+        instructorId: { type: string, format: uuid, description: 'Admin only on update; must be an active instructor.' }
+        title: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 5000 }
+        category: { type: string, minLength: 1, maxLength: 50 }
+        color: { type: string, enum: [teal, emerald, sky, amber, violet, rose] }
+        durationWeeks: { type: integer, minimum: 1, maximum: 104 }
+        sequentialUnlock: { type: boolean }
+        status: { type: string, enum: [draft, published, archived] }
+        removeTrack: { type: boolean, description: 'Update only, admin only: detach the course from its track.' }
+    Course:
+      type: object
+      required: [id, trackId, trackName, title, description, category, color, instructorId, instructorName, duration, durationWeeks, totalModules, totalLessons, enrolledCount, status, sequentialUnlock, publishedAt, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        trackId: { type: [string, 'null'], format: uuid }
+        trackName: { type: [string, 'null'] }
+        title: { type: string }
+        description: { type: string }
+        category: { type: string }
+        color: { type: string }
+        instructorId: { type: [string, 'null'], format: uuid }
+        instructorName: { type: [string, 'null'] }
+        duration: { type: string, examples: [8 weeks] }
+        durationWeeks: { type: integer }
+        totalModules: { type: integer }
+        totalLessons: { type: integer }
+        enrolledCount: { type: integer }
+        status: { type: string, enum: [draft, published, archived] }
+        sequentialUnlock: { type: boolean }
+        publishedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ModuleInput:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160 }
+        position: { type: integer, minimum: 1, description: 1-based position; others shift. }
+    Module:
+      type: object
+      required: [id, courseId, title, order, lessons]
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        title: { type: string }
+        order: { type: integer }
+        lessons:
+          type: array
+          items: { $ref: '#/components/schemas/Lesson' }
+    LessonInput:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160 }
+        type: { type: string, enum: [video, text, project] }
+        durationMinutes: { type: integer, minimum: 1, maximum: 1440 }
+        content: { type: string, maxLength: 100000 }
+        videoUrl: { type: string, maxLength: 2048, description: 'http(s) URL or empty string.' }
+        position: { type: integer, minimum: 1 }
+    Lesson:
+      type: object
+      required: [id, moduleId, courseId, title, type, duration, durationMinutes, order, status]
+      properties:
+        id: { type: string, format: uuid }
+        moduleId: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        title: { type: string }
+        type: { type: string, enum: [video, text, project] }
+        duration: { type: string, examples: [15 min] }
+        durationMinutes: { type: integer }
+        order: { type: integer }
+        status: { type: string, enum: [completed, in_progress, available, locked] }
+        content: { type: string, description: "Only on `GET /lessons/{id}`." }
+        videoUrl: { type: [string, 'null'], description: "Only on `GET /lessons/{id}`." }
+    Enrollment:
+      type: object
+      required: [id, studentId, studentName, courseId, courseTitle, progress, completedLessons, totalLessons, status, enrolledAt, completedAt, withdrawnAt]
+      properties:
+        id: { type: string, format: uuid }
+        studentId: { type: string, format: uuid }
+        studentName: { type: string }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        progress: { type: integer, minimum: 0, maximum: 100, description: Percent of lessons completed. }
+        completedLessons: { type: integer }
+        totalLessons: { type: integer }
+        status: { type: string, enum: [enrolled, in_progress, completed, withdrawn] }
+        enrolledAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        withdrawnAt: { type: [string, 'null'], format: date-time }
+
+    # ---------------------------------------------------------------- sessions
+    SessionInput:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 5000 }
+        type: { type: string, enum: [lecture, lab, workshop, review] }
+        location: { type: string, maxLength: 200 }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        recordingUrl: { type: string, maxLength: 2048, description: 'http(s) URL or empty string to clear.' }
+        recordingFileId: { type: string, description: 'File UUID uploaded by the caller, or empty string to clear.' }
+        cancelled: { type: boolean }
+    Session:
+      type: object
+      required: [id, courseId, courseTitle, title, description, type, location, date, startTime, endTime, startsAt, endsAt, instructorId, instructorName, status, recordingUrl, recordingFileId, qrCode]
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [lecture, lab, workshop, review] }
+        location: { type: string }
+        date: { type: string, format: date, description: Local date (server timezone). }
+        startTime: { type: string, examples: ['09:00'], description: Local HH:MM. }
+        endTime: { type: string, examples: ['11:00'], description: Local HH:MM. }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        instructorId: { type: [string, 'null'], format: uuid }
+        instructorName: { type: [string, 'null'] }
+        status: { type: string, enum: [upcoming, live, completed, cancelled] }
+        recordingUrl: { type: [string, 'null'] }
+        recordingFileId: { type: [string, 'null'], format: uuid }
+        qrCode: { type: [string, 'null'] }
+    Material:
+      type: object
+      required: [id, courseId, sessionId, title, description, kind, url, file, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        sessionId: { type: [string, 'null'], format: uuid }
+        title: { type: string }
+        description: { type: string }
+        kind: { type: string, enum: [link, file] }
+        url: { type: [string, 'null'] }
+        file:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [id, name, contentType, size]
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string }
+                contentType: { type: string }
+                size: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    # ---------------------------------------------------------------- files
+    File:
+      type: object
+      required: [id, ownerId, name, contentType, extension, size, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        ownerId: { type: string, format: uuid }
+        name: { type: string, description: Original file name. }
+        contentType: { type: string }
+        extension: { type: string, enum: [pdf, docx, pptx, xlsx, zip, txt, md, png, jpg, jpeg] }
+        size: { type: integer, format: int64, description: Bytes. }
+        createdAt: { type: string, format: date-time }
+
+    # ---------------------------------------------------------------- attendance
+    AttendanceStatus:
+      type: string
+      enum: [present, late, absent, excused]
+    Window:
+      type: object
+      required: [id, sessionId, courseId, status, graceMinutes, tokenTtlSeconds, openedAt, closedAt, summary]
+      properties:
+        id: { type: string, format: uuid }
+        sessionId: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        status: { type: string, enum: [open, closed] }
+        graceMinutes: { type: integer }
+        tokenTtlSeconds: { type: integer }
+        openedAt: { type: string, format: date-time }
+        closedAt: { type: [string, 'null'], format: date-time }
+        token: { type: string, description: 'Only from start/token endpoints while open. Encode into the QR code.' }
+        tokenExpiresAt: { type: string, format: date-time }
+        summary:
+          type: object
+          required: [enrolled, present, late, absent, excused, pending]
+          properties:
+            enrolled: { type: integer }
+            present: { type: integer }
+            late: { type: integer }
+            absent: { type: integer }
+            excused: { type: integer }
+            pending: { type: integer }
+    AttendanceRecord:
+      type: object
+      required: [id, sessionId, studentId, studentName, status, method, checkedInAt, reason, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        sessionId: { type: string, format: uuid }
+        studentId: { type: string, format: uuid }
+        studentName: { type: string }
+        status: { $ref: '#/components/schemas/AttendanceStatus' }
+        method: { type: string, enum: [qr, manual, auto] }
+        checkedInAt: { type: [string, 'null'], format: date-time }
+        reason: { type: [string, 'null'] }
+        updatedAt: { type: string, format: date-time }
+    StudentSummary:
+      type: object
+      required: [totalSessions, present, late, absent, excused, rate]
+      properties:
+        totalSessions: { type: integer }
+        present: { type: integer }
+        late: { type: integer }
+        absent: { type: integer }
+        excused: { type: integer }
+        rate: { type: integer, minimum: 0, maximum: 100, description: '(present + late) / (total - excused), percent.' }
+
+    # ---------------------------------------------------------------- assessment
+    QuizInput:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 5000 }
+        timeLimit: { type: integer, minimum: 1, maximum: 600, description: Minutes. }
+        removeTimeLimit: { type: boolean }
+        opensAt: { type: string, format: date-time }
+        dueAt: { type: string, format: date-time }
+        maxAttempts: { type: integer, minimum: 1, maximum: 20 }
+        passPercent: { type: integer, minimum: 0, maximum: 100 }
+        revealAnswers: { type: string, enum: [after_submission, after_close, never] }
+        status: { type: string, enum: [draft, published], description: Ignored on create. }
+    Quiz:
+      type: object
+      required: [id, courseId, courseTitle, title, description, status, timeLimit, opensAt, dueAt, dueDate, maxAttempts, passPercent, revealAnswers, totalQuestions, totalPoints, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        title: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [draft, scheduled, open, closed] }
+        timeLimit: { type: [integer, 'null'], description: Minutes. }
+        opensAt: { type: [string, 'null'], format: date-time }
+        dueAt: { type: [string, 'null'], format: date-time }
+        dueDate: { type: [string, 'null'], format: date }
+        maxAttempts: { type: integer }
+        passPercent: { type: integer }
+        revealAnswers: { type: string, enum: [after_submission, after_close, never] }
+        totalQuestions: { type: integer }
+        totalPoints: { type: integer }
+        attemptsUsed: { type: integer, description: Students only. }
+        bestPercentage: { type: integer, description: "Students only, when they have a scored attempt." }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Option:
+      type: object
+      required: [id, text, order]
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string }
+        order: { type: integer }
+        isCorrect: { type: boolean, description: Only for staff views. }
+    Question:
+      type: object
+      required: [id, text, points, order, options]
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string }
+        points: { type: integer }
+        order: { type: integer }
+        options:
+          type: array
+          items: { $ref: '#/components/schemas/Option' }
+    Answer:
+      type: object
+      required: [questionId, optionId]
+      properties:
+        questionId: { type: string, format: uuid }
+        optionId: { type: string, description: 'Chosen option id (empty string when unanswered and answers are revealed).' }
+        correctOptionId: { type: [string, 'null'], format: uuid, description: Only when answers are revealed. }
+        correct: { type: boolean, description: Only when answers are revealed. }
+    Attempt:
+      type: object
+      required: [id, quizId, studentId, studentName, attemptNumber, status, startedAt, expiresAt, submittedAt, score, total, percentage, passed, answers]
+      properties:
+        id: { type: string, format: uuid }
+        quizId: { type: string, format: uuid }
+        studentId: { type: string, format: uuid }
+        studentName: { type: string }
+        attemptNumber: { type: integer }
+        status: { type: string, enum: [in_progress, submitted, expired] }
+        startedAt: { type: string, format: date-time }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        submittedAt: { type: [string, 'null'], format: date-time }
+        score: { type: [integer, 'null'] }
+        total: { type: [integer, 'null'] }
+        percentage: { type: [integer, 'null'] }
+        passed: { type: [boolean, 'null'] }
+        answers:
+          type: [array, 'null']
+          items: { $ref: '#/components/schemas/Answer' }
+        questions:
+          type: array
+          description: Included when starting/resuming an attempt (without correct answers).
+          items: { $ref: '#/components/schemas/Question' }
+    AssignmentInput:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 10000 }
+        dueAt: { type: string, format: date-time }
+        maxGrade: { type: integer, minimum: 1, maximum: 1000 }
+        submissionTypes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: { type: string, enum: [file, url, text] }
+        latePolicy: { type: string, enum: [reject, accept, penalty] }
+        lateUntil: { type: string, format: date-time }
+        removeLateUntil: { type: boolean }
+        latePenaltyPercent: { type: integer, minimum: 0, maximum: 100 }
+        status: { type: string, enum: [draft, published] }
+    Assignment:
+      type: object
+      required: [id, courseId, courseTitle, title, description, status, published, dueAt, dueDate, maxGrade, submissionTypes, latePolicy, lateUntil, latePenaltyPercent, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        title: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [draft, open, closed] }
+        published: { type: boolean }
+        dueAt: { type: string, format: date-time }
+        dueDate: { type: string, format: date }
+        maxGrade: { type: integer }
+        submissionTypes:
+          type: array
+          items: { type: string, enum: [file, url, text] }
+        latePolicy: { type: string, enum: [reject, accept, penalty] }
+        lateUntil: { type: [string, 'null'], format: date-time }
+        latePenaltyPercent: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Submission:
+      type: object
+      required: [id, assignmentId, courseId, studentId, studentName, version, status, submittedAt, isLate, file, fileName, url, text, grade, finalGrade, maxGrade, feedback, gradedAt]
+      properties:
+        id: { type: string, format: uuid }
+        assignmentId: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        studentId: { type: string, format: uuid }
+        studentName: { type: string }
+        version: { type: integer }
+        status: { type: string, enum: [submitted, graded, returned, superseded] }
+        submittedAt: { type: string, format: date-time }
+        isLate: { type: boolean }
+        file:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [id, name, size]
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string }
+                size: { type: integer, format: int64 }
+        fileName: { type: [string, 'null'] }
+        url: { type: [string, 'null'] }
+        text: { type: [string, 'null'] }
+        grade: { type: [number, 'null'] }
+        finalGrade: { type: [number, 'null'], description: Grade after late penalty. }
+        maxGrade: { type: integer }
+        feedback: { type: [string, 'null'] }
+        gradedAt: { type: [string, 'null'], format: date-time }
+
+    # ---------------------------------------------------------------- performance
+    Policy:
+      type: object
+      required: [id, courseId, version, quizWeight, assignmentWeight, attendanceWeight, projectWeight, warningGrade, probationGrade, warningAttendance, probationAttendance, warningMissing, reason, isDefault]
+      properties:
+        id: { type: [string, 'null'], format: uuid, description: Null for the default policy. }
+        courseId: { type: string, format: uuid }
+        version: { type: integer, description: 0 for the default policy. }
+        quizWeight: { type: integer }
+        assignmentWeight: { type: integer }
+        attendanceWeight: { type: integer }
+        projectWeight: { type: integer }
+        warningGrade: { type: integer }
+        probationGrade: { type: integer }
+        warningAttendance: { type: integer }
+        probationAttendance: { type: integer }
+        warningMissing: { type: integer }
+        reason: { type: [string, 'null'] }
+        isDefault: { type: boolean }
+    Standing:
+      type: string
+      enum: [good, warning, probation]
+    Factor:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, enum: [low_grade, low_attendance, missing_work] }
+        value: { type: number }
+        threshold: { type: number }
+        count: { type: integer }
+    GradeResult:
+      type: object
+      required: [quizAvg, assignmentAvg, projectGrade, attendance, overall, missingWork, pendingWork, standing, factors]
+      properties:
+        quizAvg: { type: [number, 'null'] }
+        assignmentAvg: { type: [number, 'null'] }
+        projectGrade: { type: [number, 'null'] }
+        attendance: { type: [number, 'null'] }
+        overall: { type: [number, 'null'] }
+        missingWork: { type: integer }
+        pendingWork: { type: integer }
+        standing: { $ref: '#/components/schemas/Standing' }
+        factors:
+          type: [array, 'null']
+          items: { $ref: '#/components/schemas/Factor' }
+    CourseGrade:
+      allOf:
+        - type: object
+          required: [courseId, courseName, policyVersion]
+          properties:
+            courseId: { type: string, format: uuid }
+            courseName: { type: string }
+            policyVersion: { type: integer }
+        - $ref: '#/components/schemas/GradeResult'
+    StudentGrades:
+      type: object
+      required: [studentId, courses, gpa, standing]
+      properties:
+        studentId: { type: string, format: uuid }
+        courses:
+          type: array
+          items: { $ref: '#/components/schemas/CourseGrade' }
+        gpa: { type: [number, 'null'] }
+        standing: { $ref: '#/components/schemas/Standing' }
+    StudentStanding:
+      allOf:
+        - type: object
+          required: [studentId, studentName, courseId, courseName]
+          properties:
+            studentId: { type: string, format: uuid }
+            studentName: { type: string }
+            courseId: { type: string, format: uuid }
+            courseName: { type: string }
+        - $ref: '#/components/schemas/GradeResult'
+    StudentStandingSummary:
+      type: object
+      required: [studentId, standing, courses]
+      properties:
+        studentId: { type: string, format: uuid }
+        standing: { $ref: '#/components/schemas/Standing' }
+        courses:
+          type: array
+          items:
+            type: object
+            required: [courseId, courseName, standing, overall, factors]
+            properties:
+              courseId: { type: string, format: uuid }
+              courseName: { type: string }
+              standing: { $ref: '#/components/schemas/Standing' }
+              overall: { type: [number, 'null'] }
+              factors:
+                type: [array, 'null']
+                items: { $ref: '#/components/schemas/Factor' }
+
+    # ---------------------------------------------------------------- projects
+    Criterion:
+      type: object
+      required: [title, maxPoints]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 120 }
+        maxPoints: { type: integer, minimum: 1, maximum: 1000 }
+    ProjectInput:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string, maxLength: 10000 }
+        requirements: { type: string, maxLength: 20000 }
+        status: { type: string, enum: [draft, published] }
+        dueAt: { type: string, format: date-time }
+        maxGrade: { type: integer, minimum: 1, maximum: 1000 }
+        teamSize: { type: integer, minimum: 1, maximum: 10 }
+        requiresPresentation: { type: boolean }
+        allowResubmission: { type: boolean }
+        criteria:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/Criterion' }
+    Project:
+      type: object
+      required: [id, courseId, courseTitle, trackId, title, description, requirements, status, published, dueAt, dueDate, maxGrade, teamSize, requiresPresentation, allowResubmission, criteria, githubUrl, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        trackId: { type: [string, 'null'], format: uuid }
+        title: { type: string }
+        description: { type: string }
+        requirements: { type: string }
+        status: { type: string, enum: [draft, in_progress, closed] }
+        published: { type: boolean }
+        dueAt: { type: string, format: date-time }
+        dueDate: { type: string, format: date }
+        maxGrade: { type: integer }
+        teamSize: { type: integer }
+        requiresPresentation: { type: boolean }
+        allowResubmission: { type: boolean }
+        criteria:
+          type: array
+          items: { $ref: '#/components/schemas/Criterion' }
+        myTeamId: { type: [string, 'null'], format: uuid, description: Students only. }
+        githubUrl: { type: [string, 'null'], description: "The caller's team repository URL, if any." }
+        createdAt: { type: string, format: date-time }
+    RepoMetadata:
+      type: object
+      properties:
+        fullName: { type: string }
+        description: { type: string }
+        defaultBranch: { type: string }
+        private: { type: boolean }
+        stars: { type: integer }
+        openIssues: { type: integer }
+        pushedAt: { type: string, format: date-time }
+        language: { type: string }
+    Repository:
+      type: object
+      required: [url, owner, name, linkedAt, metadata, lastSyncedAt, syncError]
+      properties:
+        url: { type: string }
+        owner: { type: string }
+        name: { type: string }
+        linkedAt: { type: string, format: date-time }
+        metadata:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/RepoMetadata'
+        lastSyncedAt: { type: [string, 'null'], format: date-time }
+        syncError: { type: [string, 'null'] }
+    Presentation:
+      type: object
+      required: [id, projectId, teamId, scheduledAt, presentationDate, presentationTime, location, status, feedback]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        teamId: { type: string, format: uuid }
+        scheduledAt: { type: string, format: date-time }
+        presentationDate: { type: string, format: date }
+        presentationTime: { type: string, examples: ['14:30'] }
+        location: { type: string }
+        status: { type: string, enum: [scheduled, done, cancelled] }
+        feedback: { type: [string, 'null'] }
+    Team:
+      type: object
+      required: [id, projectId, name, members, repository, presentation]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        name: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+        repository:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Repository'
+        presentation:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Presentation'
+    ProjectSubmission:
+      type: object
+      required: [id, projectId, teamId, teamName, studentId, studentName, version, status, submittedAt, isLate, repoUrl, file, notes, grade, maxGrade, criteriaScores, feedback, gradedAt, presentationDate, presentationTime]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        teamId: { type: string, format: uuid }
+        teamName: { type: string }
+        studentId: { type: string, format: uuid, description: The submitting team member. }
+        studentName: { type: string }
+        version: { type: integer }
+        status: { type: string, enum: [submitted, graded, returned, superseded] }
+        submittedAt: { type: string, format: date-time }
+        isLate: { type: boolean }
+        repoUrl: { type: [string, 'null'] }
+        file:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [id, name]
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string }
+        notes: { type: [string, 'null'] }
+        grade: { type: [number, 'null'] }
+        maxGrade: { type: integer }
+        criteriaScores:
+          type: [object, 'null']
+          additionalProperties: { type: integer }
+        feedback: { type: [string, 'null'] }
+        gradedAt: { type: [string, 'null'], format: date-time }
+        presentationDate: { type: [string, 'null'], format: date }
+        presentationTime: { type: [string, 'null'] }
+
+    # ---------------------------------------------------------------- communication
+    Notification:
+      type: object
+      required: [id, type, title, message, link, read, readAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [assignment, grade, session, announcement, certificate, attendance, system] }
+        title: { type: string }
+        message: { type: string }
+        link: { type: [string, 'null'], description: Frontend route to open. }
+        read: { type: boolean }
+        readAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+    Announcement:
+      type: object
+      required: [id, title, content, authorId, authorName, authorRole, courseId, targetRoles, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        content: { type: string }
+        authorId: { type: string, format: uuid }
+        authorName: { type: string }
+        authorRole: { $ref: '#/components/schemas/RoleName' }
+        courseId: { type: [string, 'null'], format: uuid }
+        targetRoles:
+          type: array
+          description: Empty means everyone in scope.
+          items: { $ref: '#/components/schemas/RoleName' }
+        createdAt: { type: string, format: date-time }
+
+    # ---------------------------------------------------------------- dashboard
+    SessionCard:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        title: { type: string }
+        startsAt: { type: string, format: date-time }
+        date: { type: string, format: date }
+        startTime: { type: string }
+        location: { type: string }
+        instructorName: { type: [string, 'null'] }
+    WorkItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [assignment, quiz] }
+        courseId: { type: string, format: uuid }
+        courseTitle: { type: string }
+        title: { type: string }
+        dueAt: { type: string, format: date-time }
+        dueDate: { type: string, format: date }
+    StudentDashboard:
+      type: object
+      description: Loosely typed; keys below are always present.
+      additionalProperties: true
+      properties:
+        role: { type: string, const: student }
+        activeCourses: { type: integer }
+        completedCourses: { type: integer }
+        averageProgress: { type: [number, 'null'] }
+        nextSession:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/SessionCard'
+        upcomingSessions: { type: [array, 'null'], items: { $ref: '#/components/schemas/SessionCard' } }
+        pendingWork: { type: [array, 'null'], items: { $ref: '#/components/schemas/WorkItem' } }
+        pendingCount: { type: integer }
+        gpa: { type: [number, 'null'] }
+        standing: { $ref: '#/components/schemas/Standing' }
+        attendanceRate: { type: [number, 'null'] }
+        unreadNotifications: { type: integer }
+    InstructorDashboard:
+      type: object
+      description: Loosely typed; keys below are always present.
+      additionalProperties: true
+      properties:
+        role: { type: string, const: instructor }
+        assignedCourses: { type: integer }
+        students: { type: integer }
+        toReview: { type: integer, description: assignmentsToReview + projectsToReview. }
+        assignmentsToReview: { type: integer }
+        projectsToReview: { type: integer }
+        openAttendance: { type: integer }
+        nextSession:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/SessionCard'
+        upcomingSessions: { type: [array, 'null'], items: { $ref: '#/components/schemas/SessionCard' } }
+        unreadNotifications: { type: integer }
+    StaffDashboard:
+      type: object
+      description: Mentor and tracker dashboard. Loosely typed; keys below are always present.
+      additionalProperties: true
+      properties:
+        role: { type: string, enum: [mentor, tracker] }
+        tracks: { type: integer }
+        courses: { type: integer }
+        learners: { type: integer }
+        needAttention: { type: integer }
+        missingWork: { type: integer }
+        atRisk:
+          type: [array, 'null']
+          description: Top 5 at-risk standings.
+          items: { $ref: '#/components/schemas/StudentStanding' }
+        unreadNotifications: { type: integer }
+    AdminDashboard:
+      type: object
+      description: Loosely typed; keys below are always present.
+      additionalProperties: true
+      properties:
+        role: { type: string, const: admin }
+        activeUsers: { type: integer }
+        inactiveUsers: { type: integer }
+        usersByRole:
+          type: object
+          additionalProperties: { type: integer }
+        tracks: { type: integer }
+        activeTracks: { type: integer }
+        publishedCourses: { type: integer }
+        draftCourses: { type: integer }
+        sessionsThisWeek: { type: integer }
+        enrollments: { type: integer }
+        certificatesIssued: { type: integer }
+        auditEventsLast24h: { type: integer }
+        upcomingSessions: { type: [array, 'null'], items: { $ref: '#/components/schemas/SessionCard' } }
+        unreadNotifications: { type: integer }
+
+    # ---------------------------------------------------------------- certificates
+    Requirements:
+      type: object
+      required: [courseId, minGrade, minAttendance, requireAllLessons, allowProbation, isDefault]
+      properties:
+        courseId: { type: string, format: uuid }
+        minGrade: { type: integer }
+        minAttendance: { type: integer }
+        requireAllLessons: { type: boolean }
+        allowProbation: { type: boolean }
+        isDefault: { type: boolean }
+    Eligibility:
+      type: object
+      required: [studentId, studentName, courseId, eligible, reasons, overall, attendance, standing, completedLessons, totalLessons, certificateId]
+      properties:
+        studentId: { type: string, format: uuid }
+        studentName: { type: string }
+        courseId: { type: string, format: uuid }
+        eligible: { type: boolean }
+        reasons:
+          type: array
+          items: { type: string, enum: [lessons_incomplete, grade_below_minimum, no_grade_yet, attendance_below_minimum, on_probation] }
+        overall: { type: [number, 'null'] }
+        attendance: { type: [number, 'null'] }
+        standing: { $ref: '#/components/schemas/Standing' }
+        completedLessons: { type: integer }
+        totalLessons: { type: integer }
+        certificateId: { type: [string, 'null'], format: uuid, description: "Active certificate, if already issued." }
+    Certificate:
+      type: object
+      required: [id, studentId, studentName, courseId, courseName, verificationCode, status, grade, issueDate, issuedAt, revokedAt]
+      properties:
+        id: { type: string, format: uuid }
+        studentId: { type: string, format: uuid }
+        studentName: { type: string }
+        courseId: { type: string, format: uuid }
+        courseName: { type: string }
+        verificationCode: { type: string }
+        status: { type: string, enum: [issued, revoked] }
+        grade: { type: [number, 'null'] }
+        issueDate: { type: string, format: date }
+        issuedAt: { type: string, format: date-time }
+        revokedAt: { type: [string, 'null'], format: date-time }
+        revokeReason: { type: [string, 'null'], description: Present when revoked. }
+    PublicCertificate:
+      type: object
+      required: [verificationCode, status, studentName, courseName, issueDate, revokedAt]
+      properties:
+        verificationCode: { type: string }
+        status: { type: string, enum: [issued, revoked] }
+        studentName: { type: string }
+        courseName: { type: string }
+        issueDate: { type: string, format: date }
+        revokedAt: { type: [string, 'null'], format: date-time }
+    IssueResult:
+      type: object
+      required: [issued, skipped]
+      properties:
+        issued:
+          type: [array, 'null']
+          items: { $ref: '#/components/schemas/Certificate' }
+        skipped:
+          type: [array, 'null']
+          description: Students not issued, with the reasons.
+          items: { $ref: '#/components/schemas/Eligibility' }
+    CertificateEvent:
+      type: object
+      required: [id, action, actorId, actorName, reason, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, examples: [certificate.issued, certificate.revoked, certificate.reinstated] }
+        actorId: { type: [string, 'null'], format: uuid }
+        actorName: { type: [string, 'null'] }
+        reason: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
