@@ -61,7 +61,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("seed complete: %d created, %d already present\n", created, len(demoUsers)-created)
+	fmt.Printf("users: %d created, %d already present\n", created, len(demoUsers)-created)
+
+	var seeded bool
+	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		seeded, err = seedLearning(ctx, tx)
+		return err
+	})
+	if err != nil {
+		log.Fatalf("learning: %v", err)
+	}
+	if seeded {
+		fmt.Printf("learning: %d tracks and %d courses created\n", len(demoTracks), len(demoCourses))
+	} else {
+		fmt.Println("learning: demo data already present")
+	}
 }
 
 func seedUsers(ctx context.Context, pool *pgxpool.Pool, hash string) (int, error) {
