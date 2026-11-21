@@ -1,17 +1,17 @@
 export default function BrandMark({ variant = "default" }) {
   const colors =
     variant === "light"
-      ? "bg-[#ecf1df] [&>span]:bg-[#315a4f]"
-      : "bg-deep [&>span]:bg-lime";
+      ? "bg-blue-600 [&>span]:bg-white"
+      : "bg-slate-900 [&>span]:bg-blue-400";
 
   return (
     <span
-      className={`inline-flex h-7 w-7 flex-none rotate-[-4deg] items-end gap-0.75 rounded-[9px] px-1.5 py-1.25 ${colors}`}
+      className={`inline-flex h-7 w-7 flex-none items-end gap-0.75 rounded-md px-1.5 py-1.5 ${colors}`}
       aria-hidden="true"
     >
-      <span className="block h-2.25 w-1 rounded" />
-      <span className="block h-3.75 w-1 rounded" />
-      <span className="block h-3 w-1 rounded" />
+      <span className="block h-2 w-1 rounded-[1px]" />
+      <span className="block h-3.5 w-1 rounded-[1px]" />
+      <span className="block h-2.5 w-1 rounded-[1px]" />
     </span>
   );
 }

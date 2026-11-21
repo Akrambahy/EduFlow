@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
-import { ArrowRight, Search } from "lucide-react";
+import { Play, Search } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.jsx";
 import { demoCourses, demoEnrollments } from "../data/courses.js";
 import { ROLES } from "../utils/constants.js";
@@ -13,54 +13,57 @@ import {
 
 export default function CoursesPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("All courses");
+
   const courses = demoCourses.filter(
     (course) =>
       user.role !== ROLES.STUDENT || user.enrolledCourses?.includes(course.id),
   );
-  const visible = courses.filter(
-    (course) =>
-      `${course.title} ${course.category}`
-        .toLowerCase()
-        .includes(query.toLowerCase()) &&
-      (filter === "All courses" ||
-        (filter === "In progress"
-          ? demoEnrollments.some(
-              (e) =>
-                e.courseId === course.id && e.progress > 0 && e.progress < 100,
-            )
-          : filter === "Completed"
-            ? demoEnrollments.some(
-                (e) => e.courseId === course.id && e.progress === 100,
-              )
-            : true)),
-  );
+
+  const visible = courses.filter((course) => {
+    const matchesQuery = `${course.title} ${course.category}`
+      .toLowerCase()
+      .includes(query.toLowerCase());
+    const enrollment = demoEnrollments.find((e) => e.courseId === course.id);
+    const progress = enrollment?.progress || 0;
+
+    if (!matchesQuery) return false;
+    if (filter === "In progress") return progress > 0 && progress < 100;
+    if (filter === "Not started") return progress === 0;
+    if (filter === "Completed") return progress === 100;
+    return true;
+  });
+
   return (
     <>
       <PageIntro
-        kicker="YOUR LEARNING SPACE"
+        kicker="CURRICULUM & MODULES"
         title="Courses"
-        subtitle="A clear path from curious to confident."
+        subtitle="Filter by progress or resume your active module."
       />
       <div className="toolbar">
-        <div className="filter-tabs">
-          {["All courses", "In progress", "Completed"].map((name) => (
-            <button
-              className={filter === name ? "filter-tab active" : "filter-tab"}
-              key={name}
-              onClick={() => setFilter(name)}
-            >
-              {name}
-            </button>
-          ))}
+        <div className="filter-tabs" role="tablist" aria-label="Filter by progress">
+          {["All courses", "In progress", "Not started", "Completed"].map(
+            (name) => (
+              <button
+                type="button"
+                className={filter === name ? "filter-tab active" : "filter-tab"}
+                key={name}
+                onClick={() => setFilter(name)}
+              >
+                {name}
+              </button>
+            ),
+          )}
         </div>
         <label className="inline-search">
           <Search size={15} />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Find a course"
+            placeholder="Filter by title or track…"
           />
         </label>
       </div>
@@ -74,7 +77,7 @@ export default function CoursesPage() {
               <motion.article
                 className="catalog-card"
                 key={course.id}
-                initial={{ opacity: 0, y: 12 }}
+                initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.04 }}
               >
@@ -82,16 +85,22 @@ export default function CoursesPage() {
                   to={`/courses/${course.id}`}
                   className={`catalog-art art-${course.color}`}
                 >
-                  <span className="art-overline">{course.category} / 2026</span>
+                  <span className="art-overline">{course.category}</span>
                   <CourseGlyph category={course.category} large />
-                  <span className="art-course-index">0{index + 1}</span>
+                  <span className="art-course-index">
+                    {course.totalModules} MODULES
+                  </span>
                 </NavLink>
                 <div className="catalog-body">
                   <div className="catalog-meta">
                     <span>{course.totalLessons} lessons</span>
                     <span>{course.duration}</span>
                   </div>
-                  <h3>{course.title}</h3>
+                  <h3>
+                    <NavLink to={`/courses/${course.id}`}>
+                      {course.title}
+                    </NavLink>
+                  </h3>
                   <p>{course.description}</p>
                   <div className="catalog-progress">
                     <div className="progress-line">
@@ -101,13 +110,19 @@ export default function CoursesPage() {
                       <small>{progress}%</small>
                     </div>
                   </div>
-                  <NavLink
-                    to={`/courses/${course.id}`}
-                    className="catalog-continue"
-                  >
-                    {progress ? "Continue course" : "Explore course"}
-                    <ArrowRight size={15} />
-                  </NavLink>
+                  <div className="catalog-continue">
+                    <NavLink to={`/courses/${course.id}`}>
+                      Syllabus overview
+                    </NavLink>
+                    <button
+                      type="button"
+                      className="button button-dark button-sm"
+                      onClick={() => navigate(`/courses/${course.id}?resume=1`)}
+                    >
+                      <Play size={13} />
+                      {progress > 0 ? "Resume lesson" : "Start course"}
+                    </button>
+                  </div>
                 </div>
               </motion.article>
             );
@@ -115,8 +130,20 @@ export default function CoursesPage() {
         </div>
       ) : (
         <EmptyState
-          title="No courses match that search"
-          text="Try another title or switch to a different filter."
+          title="No courses match that filter"
+          text="Reset your progress filter or search query to view all enrolled courses."
+          action={
+            <button
+              type="button"
+              className="button button-outline button-sm"
+              onClick={() => {
+                setFilter("All courses");
+                setQuery("");
+              }}
+            >
+              Reset filters
+            </button>
+          }
         />
       )}
     </>

@@ -1,5 +1,11 @@
-import { useState } from "react";
-import { NavLink, Navigate, Outlet, useLocation } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  NavLink,
+  Navigate,
+  Outlet,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowRight,
@@ -19,7 +25,9 @@ import {
   X,
 } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.jsx";
-import { demoNotifications } from "../data/assessments.js";
+import { demoAssignments, demoNotifications } from "../data/assessments.js";
+import { demoCourses } from "../data/courses.js";
+import { demoSessions } from "../data/sessions.js";
 import { PRODUCT_NAME, ROLE_LABELS, ROLES } from "../utils/constants.js";
 import {
   Avatar,
@@ -85,7 +93,67 @@ export default function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [roleOpen, setRoleOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [notifications, setNotifications] = useState(demoNotifications);
+  const searchInputRef = useRef(null);
   const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        setSearchFocused(true);
+      } else if (e.key === "Escape") {
+        setSearchFocused(false);
+        setNoticeOpen(false);
+        setRoleOpen(false);
+        setHelpOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    const courseMatches = demoCourses
+      .filter((c) => `${c.title} ${c.category}`.toLowerCase().includes(q))
+      .map((c) => ({
+        id: c.id,
+        title: c.title,
+        subtitle: `${c.category} · ${c.duration}`,
+        tag: "Course",
+        to: `/courses/${c.id}`,
+      }));
+    const assignmentMatches = demoAssignments
+      .filter((a) => `${a.title} ${a.description}`.toLowerCase().includes(q))
+      .map((a) => ({
+        id: a.id,
+        title: a.title,
+        subtitle: `Due ${a.dueDate}`,
+        tag: "Work",
+        to: "/assignments",
+      }));
+    const sessionMatches = demoSessions
+      .filter((s) => `${s.title} ${s.location}`.toLowerCase().includes(q))
+      .map((s) => ({
+        id: s.id,
+        title: s.title,
+        subtitle: `${s.date} · ${s.startTime}`,
+        tag: "Session",
+        to: "/schedule",
+      }));
+    return [...courseMatches, ...assignmentMatches, ...sessionMatches].slice(
+      0,
+      6,
+    );
+  }, [searchQuery]);
+
   const pageTitle =
     navItems.find((item) => item.to === location.pathname)?.label ||
     (location.pathname.startsWith("/courses/")
@@ -95,7 +163,7 @@ export default function AppShell() {
     item.roles.includes(user?.role || ROLES.STUDENT),
   );
   const groups = [...new Set(visibleItems.map((item) => item.group))];
-  const unread = demoNotifications.filter((item) => !item.read).length;
+  const unread = notifications.filter((item) => !item.read).length;
 
   if (!user) return <Navigate to="/login" replace />;
   return (
@@ -108,6 +176,7 @@ export default function AppShell() {
             <span>.</span>
           </span>
           <button
+            type="button"
             className="icon-button sidebar-close"
             onClick={() => setMenuOpen(false)}
             aria-label="Close navigation"
@@ -116,10 +185,10 @@ export default function AppShell() {
           </button>
         </div>
         <div className="workspace-switch">
-          <div className="workspace-avatar">E</div>
+          <div className="workspace-avatar">EF</div>
           <div>
-            <strong>Learning space</strong>
-            <small>Fall semester · 2026</small>
+            <strong>Academic Term</strong>
+            <small>FALL · 2026</small>
           </div>
           <ChevronDown size={15} />
         </div>
@@ -139,7 +208,7 @@ export default function AppShell() {
                       `nav-link ${isActive ? "nav-link-active" : ""}`
                     }
                   >
-                    <Icon size={17} strokeWidth={1.8} />
+                    <Icon size={17} strokeWidth={1.85} />
                     <span>{label}</span>
                     {label === "Assignments" && (
                       <span className="nav-count">3</span>
@@ -150,17 +219,49 @@ export default function AppShell() {
           ))}
         </nav>
         <div className="sidebar-bottom">
+          {helpOpen && (
+            <div className="help-drawer">
+              <div className="help-drawer-head">
+                <strong>Quick shortcuts & support</strong>
+                <button
+                  type="button"
+                  className="icon-button"
+                  style={{ width: 24, height: 24 }}
+                  onClick={() => setHelpOpen(false)}
+                  aria-label="Close help"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <ul>
+                <li>
+                  <span>Global search</span>
+                  <kbd>⌘ K</kbd>
+                </li>
+                <li>
+                  <span>Close popovers</span>
+                  <kbd>Esc</kbd>
+                </li>
+                <li>
+                  <span>Advisor desk</span>
+                  <strong>support@eduflow.dev</strong>
+                </li>
+              </ul>
+            </div>
+          )}
           <div className="help-card">
             <span className="help-icon">
-              <CircleHelp size={17} />
+              <CircleHelp size={16} />
             </span>
             <div>
               <strong>Need a hand?</strong>
-              <p>Your learning team is here to help.</p>
+              <p>Keyboard shortcuts and academic support.</p>
               <button
-                onClick={() => alert("Help center is a demo placeholder.")}
+                type="button"
+                onClick={() => setHelpOpen((prev) => !prev)}
               >
-                Visit help center <ArrowRight size={13} />
+                {helpOpen ? "Hide quick guide" : "Open quick guide"}{" "}
+                <ArrowRight size={13} />
               </button>
             </div>
           </div>
@@ -170,12 +271,13 @@ export default function AppShell() {
               <strong>{user.name}</strong>
               <small>{ROLE_LABELS[user.role]}</small>
             </span>
-            <MoreHorizontal size={18} />
+            <MoreHorizontal size={17} />
           </NavLink>
         </div>
       </aside>
       {menuOpen && (
         <button
+          type="button"
           className="mobile-scrim"
           aria-label="Close menu"
           onClick={() => setMenuOpen(false)}
@@ -184,6 +286,7 @@ export default function AppShell() {
       <main className="main-column">
         <header className="topbar">
           <button
+            type="button"
             className="icon-button mobile-menu"
             onClick={() => setMenuOpen(true)}
             aria-label="Open navigation"
@@ -196,34 +299,91 @@ export default function AppShell() {
             <strong>{pageTitle}</strong>
           </div>
           <div className="topbar-actions">
-            <label className="search-field">
-              <Search size={16} />
-              <input
-                aria-label="Search"
-                placeholder="Search anything…"
-                onKeyDown={(e) =>
-                  e.key === "Enter" && alert("Search is a demo placeholder.")
-                }
-              />
-              <kbd>⌘ K</kbd>
-            </label>
+            <div className="search-wrap">
+              <label className="search-field">
+                <Search size={15} />
+                <input
+                  ref={searchInputRef}
+                  aria-label="Search courses, work, or sessions"
+                  placeholder="Search courses, work…"
+                  value={searchQuery}
+                  onFocus={() => setSearchFocused(true)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setSearchFocused(true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && searchResults.length > 0) {
+                      navigate(searchResults[0].to);
+                      setSearchFocused(false);
+                      setSearchQuery("");
+                    }
+                  }}
+                />
+                <kbd>⌘K</kbd>
+              </label>
+              {searchFocused && searchQuery.trim().length > 0 && (
+                <div className="search-results-popover">
+                  {searchResults.length > 0 ? (
+                    searchResults.map((res) => (
+                      <button
+                        type="button"
+                        key={`${res.tag}-${res.id}`}
+                        className="search-result-item"
+                        onClick={() => {
+                          navigate(res.to);
+                          setSearchFocused(false);
+                          setSearchQuery("");
+                        }}
+                      >
+                        <span>
+                          <strong>{res.title}</strong>
+                          <small>{res.subtitle}</small>
+                        </span>
+                        <span className="search-result-tag">{res.tag}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-3 py-2.5 text-[12px] text-muted">
+                      No matching courses, assignments, or sessions.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="role-switch-wrap">
               <button
+                type="button"
                 className="icon-button notification-button"
-                onClick={() => setNoticeOpen(!noticeOpen)}
+                onClick={() => {
+                  setNoticeOpen((prev) => !prev);
+                  setRoleOpen(false);
+                }}
                 aria-label={`Notifications, ${unread} unread`}
               >
                 <Bell size={18} />
                 {unread > 0 && <span className="notification-dot" />}
               </button>
               {noticeOpen && (
-                <NotificationPopover onClose={() => setNoticeOpen(false)} />
+                <NotificationPopover
+                  notifications={notifications}
+                  onMarkAllRead={() =>
+                    setNotifications((prev) =>
+                      prev.map((item) => ({ ...item, read: true })),
+                    )
+                  }
+                  onClose={() => setNoticeOpen(false)}
+                />
               )}
             </div>
             <div className="role-switch-wrap">
               <button
+                type="button"
                 className="top-user"
-                onClick={() => setRoleOpen(!roleOpen)}
+                onClick={() => {
+                  setRoleOpen((prev) => !prev);
+                  setNoticeOpen(false);
+                }}
               >
                 <Avatar name={user.name} />
                 <span>
@@ -248,10 +408,10 @@ export default function AppShell() {
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
-              initial={{ opacity: 0, y: 7 }}
+              initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.18 }}
+              transition={{ duration: 0.16 }}
             >
               <Outlet />
             </motion.div>

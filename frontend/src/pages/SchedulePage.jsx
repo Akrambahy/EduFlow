@@ -2,11 +2,12 @@ import { useState } from "react";
 import { motion } from "motion/react";
 import {
   ArrowRight,
-  ArrowUpRight,
   CalendarDays,
+  CheckCircle2,
   Clock3,
   Plus,
   Sparkles,
+  X,
 } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.jsx";
 import { demoCourses } from "../data/courses.js";
@@ -17,26 +18,53 @@ import { Avatar, PageIntro } from "../components/common/index.js";
 export default function SchedulePage() {
   const { user } = useAuth();
   const [selected, setSelected] = useState("Upcoming");
-  const items = demoSessions.filter((session) =>
+  const [sessions, setSessions] = useState(demoSessions);
+  const [activeSession, setActiveSession] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [reminderSaved, setReminderSaved] = useState(false);
+
+  const [newTitle, setNewTitle] = useState("");
+  const [newDate, setNewDate] = useState("2026-11-12");
+  const [newLocation, setNewLocation] = useState("Room 301");
+
+  const items = sessions.filter((session) =>
     selected === "Upcoming"
       ? session.status === "upcoming"
       : session.status === "completed",
   );
+
+  function handleCreateSession(e) {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+    const created = {
+      id: `ses_${Date.now()}`,
+      courseId: "crs_react",
+      title: newTitle.trim(),
+      date: newDate,
+      startTime: "11:00",
+      endTime: "12:30",
+      location: newLocation.trim() || "Room 301",
+      type: "workshop",
+      instructorId: user.id,
+      status: "upcoming",
+    };
+    setSessions((prev) => [created, ...prev]);
+    setNewTitle("");
+    setCreateOpen(false);
+  }
+
   return (
     <>
       <PageIntro
-        kicker="MAKE SPACE TO LEARN"
+        kicker="TIMETABLE & LIVE WORKSHOPS"
         title="Schedule"
-        subtitle="Sessions, milestones, and time well spent."
+        subtitle="Upcoming lectures, lab sessions, and attendance check-ins."
         action={
           user.role === ROLES.INSTRUCTOR || user.role === ROLES.ADMIN ? (
             <button
+              type="button"
               className="button button-dark"
-              onClick={() =>
-                alert(
-                  "Session creation will connect to the Go API when its contract is ready.",
-                )
-              }
+              onClick={() => setCreateOpen(true)}
             >
               <Plus size={16} /> New session
             </button>
@@ -47,6 +75,7 @@ export default function SchedulePage() {
         <div className="filter-tabs">
           {["Upcoming", "Past sessions"].map((name) => (
             <button
+              type="button"
               key={name}
               onClick={() => setSelected(name)}
               className={`filter-tab ${selected === name ? "active" : ""}`}
@@ -56,7 +85,7 @@ export default function SchedulePage() {
           ))}
         </div>
         <div className="month-label">
-          <CalendarDays size={15} /> November 2026
+          <CalendarDays size={15} /> NOVEMBER 2026
         </div>
       </div>
       <div className="schedule-list">
@@ -68,7 +97,7 @@ export default function SchedulePage() {
             <motion.article
               className="schedule-row"
               key={session.id}
-              initial={{ opacity: 0, x: 8 }}
+              initial={{ opacity: 0, x: 6 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: index * 0.04 }}
             >
@@ -96,8 +125,8 @@ export default function SchedulePage() {
                 </span>
                 <h3>{session.title}</h3>
                 <p>
-                  <Clock3 size={14} /> {session.startTime} – {session.endTime}{" "}
-                  <span>·</span> {session.location}
+                  <Clock3 size={14} /> {session.startTime} – {session.endTime} ·{" "}
+                  {session.location}
                 </p>
               </div>
               <div className="schedule-owner">
@@ -108,28 +137,137 @@ export default function SchedulePage() {
                 </span>
               </div>
               <button
-                className="icon-button row-action"
-                aria-label={`Open ${session.title}`}
-                onClick={() => alert("Session detail is a demo placeholder.")}
+                type="button"
+                className="button button-outline button-sm"
+                onClick={() => setActiveSession(session)}
               >
-                <ArrowUpRight size={17} />
+                Session details
               </button>
             </motion.article>
           );
         })}
       </div>
+
       <div className="info-strip">
         <Sparkles size={17} />
         <p>
-          <strong>Make it a good session.</strong> Add a reminder to your
-          calendar so you can arrive ready to learn.
+          <strong>Sync your academic calendar.</strong>{" "}
+          {reminderSaved
+            ? "Calendar reminders enabled for all Fall 2026 sessions."
+            : "Enable automated reminders 30 minutes before each live workshop."}
         </p>
         <button
-          onClick={() => alert("Calendar integration is not connected yet.")}
+          type="button"
+          onClick={() => setReminderSaved((prev) => !prev)}
         >
-          Add reminder <ArrowRight size={14} />
+          {reminderSaved ? (
+            <>
+              <CheckCircle2 size={14} /> Reminders active
+            </>
+          ) : (
+            <>
+              Enable reminders <ArrowRight size={14} />
+            </>
+          )}
         </button>
       </div>
+
+      {activeSession && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <div className="modal-header">
+              <h3>{activeSession.title}</h3>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setActiveSession(null)}
+                aria-label="Close session details"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <span className="eyebrow">
+                {activeSession.type.toUpperCase()} · {activeSession.location}
+              </span>
+              <p className="muted">
+                Scheduled on {activeSession.date} from {activeSession.startTime}{" "}
+                to {activeSession.endTime}. Attendance check-in opens 10 minutes
+                prior to start time.
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-dark"
+                onClick={() => setActiveSession(null)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {createOpen && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <div className="modal-header">
+              <h3>Schedule new session</h3>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setCreateOpen(false)}
+                aria-label="Close modal"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <form onSubmit={handleCreateSession}>
+              <div className="modal-body">
+                <label className="field-group">
+                  Session title
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g., Custom Hooks & Context Workshop"
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                  />
+                </label>
+                <label className="field-group">
+                  Date
+                  <input
+                    type="date"
+                    value={newDate}
+                    onChange={(e) => setNewDate(e.target.value)}
+                  />
+                </label>
+                <label className="field-group">
+                  Room / Venue
+                  <input
+                    type="text"
+                    value={newLocation}
+                    onChange={(e) => setNewLocation(e.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="button button-outline"
+                  onClick={() => setCreateOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="button button-dark">
+                  Create session
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </>
   );
 }

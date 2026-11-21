@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight, ShieldCheck } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.jsx";
 import { demoUsers } from "../data/users.js";
 import { ROLE_LABELS } from "../utils/constants.js";
@@ -36,22 +36,37 @@ export default function LoginPage() {
       <section className="login-art" aria-label="EduFlow learning platform">
         <div className="login-art-top">
           <BrandMark variant="light" />
-          <span>LEARN WITH INTENTION</span>
+          <span>EDUFLOW ACADEMIC PORTAL</span>
         </div>
         <div className="login-art-copy">
-          <span className="eyebrow light">A little progress, every day</span>
+          <span className="eyebrow light">STRUCTURED COHORT LEARNING</span>
           <h1>
-            Make room for
+            Focused coursework,
             <br />
-            <em>what’s next.</em>
+            <em>clear progress.</em>
           </h1>
-          <p>One thoughtful place for your courses, mentors, and momentum.</p>
+          <p>
+            Manage courses, submit engineering deliverables, and track verified
+            academic milestones in one workspace.
+          </p>
+          <div className="login-metrics-card">
+            <div>
+              <strong>04</strong>
+              <span>Active courses</span>
+            </div>
+            <div>
+              <strong>90%</strong>
+              <span>Cohort attendance</span>
+            </div>
+            <div>
+              <strong>24/7</strong>
+              <span>Credential verify</span>
+            </div>
+          </div>
         </div>
-        <div className="orbit orbit-one" />
-        <div className="orbit orbit-two" />
         <div className="login-art-foot">
-          <span>EDUFLOW · LEARNING, IN MOTION</span>
-          <span>01 / 05</span>
+          <span>EDUFLOW · FALL SEMESTER 2026</span>
+          <span>v2.0 ACADEMIC</span>
         </div>
       </section>
       <section className="login-panel">
@@ -59,9 +74,9 @@ export default function LoginPage() {
           <BrandMark />
         </div>
         <div className="login-form-wrap">
-          <span className="eyebrow">WELCOME BACK</span>
-          <h2>Good to see you.</h2>
-          <p className="muted">Sign in to pick up where you left off.</p>
+          <span className="eyebrow">SIGN IN</span>
+          <h2>Access your workspace.</h2>
+          <p className="muted">Enter your credentials or select a demo role.</p>
           <form onSubmit={handleSubmit} className="login-form">
             <label>
               Email address
@@ -97,12 +112,13 @@ export default function LoginPage() {
             </button>
           </form>
           <div className="demo-hint">
-            <Sparkles size={15} />
-            <span>Demo mode · use any role account below</span>
+            <ShieldCheck size={15} />
+            <span>Quick role switch · select an account</span>
           </div>
           <div className="demo-account-list">
             {demoUsers.map((user) => (
               <button
+                type="button"
                 key={user.id}
                 onClick={() => {
                   setEmail(user.email);
@@ -116,7 +132,8 @@ export default function LoginPage() {
           </div>
         </div>
         <p className="login-legal">
-          By continuing, you agree to the platform’s terms and privacy policy.
+          By continuing, you agree to the platform’s academic integrity and
+          privacy policies.
         </p>
       </section>
     </main>
